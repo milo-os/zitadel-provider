@@ -32,6 +32,7 @@ assuming it is one process.
 |---|---|
 | [passkey-local-testing.md](runbooks/passkey-local-testing.md) | End-to-end passkey testing against a local stack |
 | [identity-api-tests.md](runbooks/identity-api-tests.md) | Exercising the aggregated apiserver's identity kinds |
+| [account-recovery.md](runbooks/account-recovery.md) | Recovery flags, verifying both triggers, the `EmailVerified` writer, and the C9 gauge |
 
 ## Conventions
 
