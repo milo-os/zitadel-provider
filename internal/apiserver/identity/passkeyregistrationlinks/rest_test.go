@@ -352,7 +352,7 @@ func TestCreate_HappyPath(t *testing.T) {
 		t.Fatal("status.expiresAt is nil")
 	}
 	wantLo, wantHi := before.Add(59*time.Minute), time.Now().Add(61*time.Minute)
-	if got.Status.ExpiresAt.Time.Before(wantLo) || got.Status.ExpiresAt.Time.After(wantHi) {
+	if got.Status.ExpiresAt.Time.Before(wantLo) || got.Status.ExpiresAt.After(wantHi) {
 		t.Errorf("status.expiresAt = %v, want ~now+60m", got.Status.ExpiresAt.Time)
 	}
 }
