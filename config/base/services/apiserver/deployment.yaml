@@ -41,7 +41,25 @@ spec:
             - --zitadel-introspection-project-id=$(ZITADEL_INTROSPECTION_PROJECT_ID)
             - -v=4
             - --enable-impersonation-fallback=$(ENABLE_IMPERSONATION_FALLBACK)
+            - --recovery-links-enabled=$(RECOVERY_LINKS_ENABLED)
+            - --account-recovery-support-template=$(ACCOUNT_RECOVERY_SUPPORT_TEMPLATE)
+            - --account-recovery-complete-url=$(ACCOUNT_RECOVERY_COMPLETE_URL)
+            - --account-recovery-expiry-minutes=$(ACCOUNT_RECOVERY_EXPIRY_MINUTES)
+            - --notification-namespace=$(NOTIFICATION_NAMESPACE)
           env:
+            # The admin backstop's switch, owned by infra: while false the
+            # PasskeyRegistrationLink create returns 503, so the milo role that
+            # authorises it can ship dormant.
+            - name: RECOVERY_LINKS_ENABLED
+              value: "false"
+            - name: ACCOUNT_RECOVERY_SUPPORT_TEMPLATE
+              value: ""
+            - name: ACCOUNT_RECOVERY_COMPLETE_URL
+              value: ""
+            - name: ACCOUNT_RECOVERY_EXPIRY_MINUTES
+              value: "60"
+            - name: NOTIFICATION_NAMESPACE
+              value: milo-system
             - name: LOG_LEVEL
               value: "info"
             - name: LOG_FORMAT
