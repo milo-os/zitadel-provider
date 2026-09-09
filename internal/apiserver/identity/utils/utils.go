@@ -84,6 +84,49 @@ func CanGetUser(ctx context.Context, sar SubjectAccessReviewer, caller user.Info
 	return review.Status.Allowed, nil
 }
 
+// CanCreatePasskeyRegistrationLink asks milo whether `caller` may send a passkey
+// recovery link to `targetUserName`.
+//
+// Same delegation as CanGetUser: milo is the single Policy Decision Point, and its
+// OpenFGA authorizer resolves the identity-passkey-registration-links-editor role
+// through the parent context below. The parent extras are what make the grant
+// user-scoped rather than cluster-wide — the same convention the Project-scoped
+// resources use.
+func CanCreatePasskeyRegistrationLink(ctx context.Context, sar SubjectAccessReviewer, caller user.Info, targetUserName string) (bool, error) {
+	if sar == nil {
+		return false, fmt.Errorf("no SubjectAccessReviewer configured")
+	}
+	if caller == nil {
+		return false, fmt.Errorf("no caller info in context")
+	}
+
+	extra := toAuthzExtra(caller.GetExtra())
+	if extra == nil {
+		extra = map[string]authzv1.ExtraValue{}
+	}
+	extra["iam.miloapis.com/parent-type"] = authzv1.ExtraValue{"User"}
+	extra["iam.miloapis.com/parent-name"] = authzv1.ExtraValue{targetUserName}
+
+	review, err := sar.Create(ctx, &authzv1.SubjectAccessReview{
+		Spec: authzv1.SubjectAccessReviewSpec{
+			User:   caller.GetName(),
+			UID:    caller.GetUID(),
+			Groups: caller.GetGroups(),
+			Extra:  extra,
+			ResourceAttributes: &authzv1.ResourceAttributes{
+				Verb:     "create",
+				Group:    "identity.miloapis.com",
+				Resource: "passkeyregistrationlinks",
+				Name:     targetUserName,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return false, fmt.Errorf("subjectaccessreview against milo: %w", err)
+	}
+	return review.Status.Allowed, nil
+}
+
 // toAuthzExtra adapts user.Info.GetExtra() to the type expected by the
 // authorization API.
 func toAuthzExtra(extra map[string][]string) map[string]authzv1.ExtraValue {
