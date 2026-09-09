@@ -17,6 +17,9 @@ type fakeUserService struct {
 	userv2.UserServiceClient
 	listUsers    func(ctx context.Context, in *userv2.ListUsersRequest, opts ...grpc.CallOption) (*userv2.ListUsersResponse, error)
 	listPasskeys func(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error)
+
+	createPasskeyRegistrationLink func(ctx context.Context, in *userv2.CreatePasskeyRegistrationLinkRequest, opts ...grpc.CallOption) (*userv2.CreatePasskeyRegistrationLinkResponse, error)
+	listAuthMethodTypes           func(ctx context.Context, in *userv2.ListAuthenticationMethodTypesRequest, opts ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error)
 }
 
 func (f *fakeUserService) ListUsers(ctx context.Context, in *userv2.ListUsersRequest, opts ...grpc.CallOption) (*userv2.ListUsersResponse, error) {
@@ -25,6 +28,14 @@ func (f *fakeUserService) ListUsers(ctx context.Context, in *userv2.ListUsersReq
 
 func (f *fakeUserService) ListPasskeys(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error) {
 	return f.listPasskeys(ctx, in, opts...)
+}
+
+func (f *fakeUserService) CreatePasskeyRegistrationLink(ctx context.Context, in *userv2.CreatePasskeyRegistrationLinkRequest, opts ...grpc.CallOption) (*userv2.CreatePasskeyRegistrationLinkResponse, error) {
+	return f.createPasskeyRegistrationLink(ctx, in, opts...)
+}
+
+func (f *fakeUserService) ListAuthenticationMethodTypes(ctx context.Context, in *userv2.ListAuthenticationMethodTypesRequest, opts ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+	return f.listAuthMethodTypes(ctx, in, opts...)
 }
 
 func humanUser(id, username, email, given, family string, state userv2.UserState) *userv2.User {
@@ -249,4 +260,125 @@ func TestUserMetadata_CarriesLegacyBareValue(t *testing.T) {
 	if m.Value != "2026-01-02T15:04:05Z" {
 		t.Fatalf("value must round-trip unmodified, got %q", m.Value)
 	}
+}
+
+func TestCreatePasskeyRegistrationLink(t *testing.T) {
+	t.Run("asks for the ReturnCode medium and returns the code pair", func(t *testing.T) {
+		// Arrange
+		var gotReq *userv2.CreatePasskeyRegistrationLinkRequest
+		c := &SDKClient{user: &fakeUserService{
+			createPasskeyRegistrationLink: func(_ context.Context, in *userv2.CreatePasskeyRegistrationLinkRequest, _ ...grpc.CallOption) (*userv2.CreatePasskeyRegistrationLinkResponse, error) {
+				gotReq = in
+				return &userv2.CreatePasskeyRegistrationLinkResponse{
+					Code: &userv2.PasskeyRegistrationCode{Id: "code-id-1", Code: "K7QM2XD4"},
+				}, nil
+			},
+		}}
+
+		// Act
+		codeID, code, err := c.CreatePasskeyRegistrationLink(context.Background(), "user-1")
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if codeID != "code-id-1" || code != "K7QM2XD4" {
+			t.Errorf("CreatePasskeyRegistrationLink() = (%q, %q), want (%q, %q)", codeID, code, "code-id-1", "K7QM2XD4")
+		}
+		if gotReq.GetUserId() != "user-1" {
+			t.Errorf("request UserId = %q, want %q", gotReq.GetUserId(), "user-1")
+		}
+		// The ReturnCode medium is what keeps the code out of Zitadel's SMTP: it
+		// comes back to us and leaves through the Datum mail pipeline instead.
+		if gotReq.GetReturnCode() == nil {
+			t.Errorf("request medium = %#v, want the ReturnCode oneof", gotReq.GetMedium())
+		}
+		if gotReq.GetSendLink() != nil {
+			t.Error("request set the SendLink medium; Zitadel SMTP must stay dark")
+		}
+	})
+
+	t.Run("rejects a response with no code", func(t *testing.T) {
+		c := &SDKClient{user: &fakeUserService{
+			createPasskeyRegistrationLink: func(context.Context, *userv2.CreatePasskeyRegistrationLinkRequest, ...grpc.CallOption) (*userv2.CreatePasskeyRegistrationLinkResponse, error) {
+				return &userv2.CreatePasskeyRegistrationLinkResponse{}, nil
+			},
+		}}
+		if _, _, err := c.CreatePasskeyRegistrationLink(context.Background(), "user-1"); err == nil {
+			t.Fatal("expected an error for an empty code, got nil")
+		}
+	})
+
+	t.Run("propagates API errors", func(t *testing.T) {
+		boom := errors.New("boom")
+		c := &SDKClient{user: &fakeUserService{
+			createPasskeyRegistrationLink: func(context.Context, *userv2.CreatePasskeyRegistrationLinkRequest, ...grpc.CallOption) (*userv2.CreatePasskeyRegistrationLinkResponse, error) {
+				return nil, boom
+			},
+		}}
+		_, _, err := c.CreatePasskeyRegistrationLink(context.Background(), "user-1")
+		if !errors.Is(err, boom) {
+			t.Fatalf("expected wrapped boom error, got %v", err)
+		}
+	})
+}
+
+func TestListAuthMethodTypes(t *testing.T) {
+	t.Run("maps the enum to its raw names", func(t *testing.T) {
+		// Arrange
+		var gotReq *userv2.ListAuthenticationMethodTypesRequest
+		c := &SDKClient{user: &fakeUserService{
+			listAuthMethodTypes: func(_ context.Context, in *userv2.ListAuthenticationMethodTypesRequest, _ ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+				gotReq = in
+				return &userv2.ListAuthenticationMethodTypesResponse{
+					AuthMethodTypes: []userv2.AuthenticationMethodType{
+						userv2.AuthenticationMethodType_AUTHENTICATION_METHOD_TYPE_PASSKEY,
+					},
+				}, nil
+			},
+		}}
+
+		// Act
+		types, err := c.ListAuthMethodTypes(context.Background(), "user-1")
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"AUTHENTICATION_METHOD_TYPE_PASSKEY"}
+		if len(types) != len(want) || types[0] != want[0] {
+			t.Errorf("ListAuthMethodTypes() = %+v, want %+v", types, want)
+		}
+		if gotReq.GetUserId() != "user-1" {
+			t.Errorf("request UserId = %q, want %q", gotReq.GetUserId(), "user-1")
+		}
+	})
+
+	t.Run("empty result returns empty slice, not nil", func(t *testing.T) {
+		c := &SDKClient{user: &fakeUserService{
+			listAuthMethodTypes: func(context.Context, *userv2.ListAuthenticationMethodTypesRequest, ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+				return &userv2.ListAuthenticationMethodTypesResponse{}, nil
+			},
+		}}
+		types, err := c.ListAuthMethodTypes(context.Background(), "user-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if types == nil || len(types) != 0 {
+			t.Errorf("ListAuthMethodTypes() = %#v, want empty non-nil slice", types)
+		}
+	})
+
+	t.Run("propagates API errors", func(t *testing.T) {
+		boom := errors.New("boom")
+		c := &SDKClient{user: &fakeUserService{
+			listAuthMethodTypes: func(context.Context, *userv2.ListAuthenticationMethodTypesRequest, ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error) {
+				return nil, boom
+			},
+		}}
+		_, err := c.ListAuthMethodTypes(context.Background(), "user-1")
+		if !errors.Is(err, boom) {
+			t.Fatalf("expected wrapped boom error, got %v", err)
+		}
+	})
 }
