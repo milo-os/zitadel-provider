@@ -25,6 +25,7 @@ import (
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 	generatedopenapi "k8s.io/kubernetes/pkg/generated/openapi"
 
+	registrypasskeyregistrationlinks "go.miloapis.com/auth-provider-zitadel/internal/apiserver/identity/passkeyregistrationlinks"
 	registrypasskeys "go.miloapis.com/auth-provider-zitadel/internal/apiserver/identity/passkeys"
 	registryserviceaccountkeys "go.miloapis.com/auth-provider-zitadel/internal/apiserver/identity/serviceaccountkeys"
 	registrysessions "go.miloapis.com/auth-provider-zitadel/internal/apiserver/identity/sessions"
@@ -32,8 +33,11 @@ import (
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	identityinstall "go.miloapis.com/auth-provider-zitadel/pkg/apis/identity"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
+	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	miloidentity "go.miloapis.com/milo/pkg/apis/identity"
 	identityv1alpha1 "go.miloapis.com/milo/pkg/apis/identity/v1alpha1"
+	notificationv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -61,6 +65,12 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 		zitadelIntrospectionProjectID    string
 		// Local testing override
 		enableImpersonationFallback bool
+		// Account recovery (admin backstop, Phase C)
+		recoveryLinksEnabled           bool
+		accountRecoverySupportTemplate string
+		accountRecoveryCompleteURL     string
+		accountRecoveryExpiryMinutes   int
+		notificationNamespace          string
 	)
 
 	cmd := &cobra.Command{
@@ -176,6 +186,38 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 				log.Info("Cross-user identity/session lookups enabled via milo SAR", "host", restCfg.Host)
 			}
 
+			// Uncached client to the core control plane: the recovery resource reads
+			// one User and creates one Email per request. It shares the kube client
+			// config the SAR client above was built from.
+			var miloClient ctrlclient.Client
+			if restCfg != nil {
+				miloScheme := runtime.NewScheme()
+				if err := iamv1alpha1.AddToScheme(miloScheme); err != nil {
+					return fmt.Errorf("add iam types to milo scheme: %w", err)
+				}
+				if err := notificationv1alpha1.AddToScheme(miloScheme); err != nil {
+					return fmt.Errorf("add notification types to milo scheme: %w", err)
+				}
+				miloClient, err = ctrlclient.New(restCfg, ctrlclient.Options{Scheme: miloScheme})
+				if err != nil {
+					return fmt.Errorf("build milo client: %w", err)
+				}
+			}
+
+			passkeyRegistrationLinks, err := registrypasskeyregistrationlinks.New(registrypasskeyregistrationlinks.Options{
+				Z:                     zc,
+				Milo:                  miloClient,
+				MiloSAR:               miloSAR,
+				Enabled:               recoveryLinksEnabled,
+				SupportTemplateName:   accountRecoverySupportTemplate,
+				NotificationNamespace: notificationNamespace,
+				CompleteURL:           accountRecoveryCompleteURL,
+				ExpiryMinutes:         accountRecoveryExpiryMinutes,
+			})
+			if err != nil {
+				return fmt.Errorf("init passkeyregistrationlinks storage: %w", err)
+			}
+
 			storage := map[string]rest.Storage{
 				"sessions":       &registrysessions.REST{Z: zc, MiloSAR: miloSAR},
 				"useridentities": &registryuseridentities.REST{Z: zc, MiloSAR: miloSAR},
@@ -185,6 +227,7 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 					EnableImpersonationFallback: enableImpersonationFallback,
 					IntrospectionProjectID:      zitadelIntrospectionProjectID,
 				},
+				"passkeyregistrationlinks": passkeyRegistrationLinks,
 			}
 
 			agi := genericserver.NewDefaultAPIGroupInfo(identityv1alpha1.SchemeGroupVersion.Group, scheme, metav1.ParameterCodec, codecs)
@@ -212,6 +255,19 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 	cmd.Flags().StringVar(&zitadelAPI, "zitadel-api", "", "Zitadel API base URL")
 	cmd.Flags().StringVar(&zitadelKeyPath, "zitadel-key", "", "Path to Zitadel machine account key")
 	cmd.Flags().DurationVar(&zitadelDefaultMachineKeyExpirary, "zitadel-default-machine-key-expiration", 10*365*24*time.Hour, "The default duration for machine account keys (defaults to 10 years)")
+	// Account recovery (admin backstop). --recovery-links-enabled is the infra-owned
+	// switch: while false the create returns 503, so the milo role can ship dormant.
+	cmd.Flags().BoolVar(&recoveryLinksEnabled, "recovery-links-enabled", false,
+		"Enable the PasskeyRegistrationLink create; while false the endpoint returns 503")
+	cmd.Flags().StringVar(&accountRecoverySupportTemplate, "account-recovery-support-template", "",
+		"EmailTemplate resource for support-triggered account recovery mail")
+	cmd.Flags().StringVar(&accountRecoveryCompleteURL, "account-recovery-complete-url", "",
+		"Landing URL for the mailed recovery link, e.g. https://auth.datum.net/recover/complete")
+	cmd.Flags().IntVar(&accountRecoveryExpiryMinutes, "account-recovery-expiry-minutes", 60,
+		"Recovery code lifetime shown to users; must match Zitadel's PasswordlessInitCode lifetime")
+	cmd.Flags().StringVar(&notificationNamespace, "notification-namespace", "milo-system",
+		"Namespace in which Email resources are created")
+
 	cmd.Flags().StringVar(&zitadelIntrospectionProjectID, "zitadel-introspection-project-id", "", "Numeric Zitadel project ID (e.g. 326089123456789012) that the authn webhook's introspection client is a member of. When set, generated machine account credentials include an audience scope for this project so their tokens can be introspected. Leave empty to preserve prior behavior.")
 	cmd.Flags().BoolVar(&enableImpersonationFallback, "enable-impersonation-fallback", false, "Enable looking up project ID from k8s impersonation extras (for local testing without Milo proxy)")
 
