@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	notificationv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
 
@@ -29,6 +30,7 @@ type mockZitadelAPI struct {
 	listUserMetadataFunc func(ctx context.Context, userID string) ([]zitadel.UserMetadata, error)
 	authMethodTypesFunc  func(ctx context.Context, userID string) ([]string, error)
 	registrationLinkFunc func(ctx context.Context, userID string) (string, string, error)
+	getUserByIDFunc      func(ctx context.Context, userID string) (*zitadel.User, error)
 }
 
 // ListUserMetadata backs A-PR2's passkey-name lookup. Left nil it returns
@@ -84,6 +86,9 @@ func (m *mockZitadelAPI) GetOrganization(ctx context.Context, orgID string) (*zi
 	return nil, nil
 }
 func (m *mockZitadelAPI) GetUserByID(ctx context.Context, userID string) (*zitadel.User, error) {
+	if m.getUserByIDFunc != nil {
+		return m.getUserByIDFunc(ctx, userID)
+	}
 	return nil, nil
 }
 func (m *mockZitadelAPI) ListHumanUsers(context.Context, uint64, uint32) ([]zitadel.User, int, error) {
@@ -1025,5 +1030,119 @@ func TestMiloUserIDFromIdpIntent(t *testing.T) {
 	req = IdpIntentSucceededRequest{UserID: "top-level-id"}
 	if got := miloUserIDFromIdpIntent(req); got != "top-level-id" {
 		t.Fatalf("got %q, want top-level-id", got)
+	}
+}
+
+// C11: the condition must be right from the first reconcile, so provisioning reads
+// Zitadel's verified flag once and records it. IdP-created users are verified at
+// creation and get True immediately; email signups get False.
+func TestCreateUserAccountHandler_SetsInitialEmailVerified(t *testing.T) {
+	const body = `{
+		"aggregateID": "362926680773230861",
+		"event_type": "user.human.added",
+		"created_at": "2026-06-05T12:00:00Z",
+		"userID": "362926680773230861",
+		"event_payload": {"firstName":"Jane","lastName":"Doe","email":"jane@example.com"}
+	}`
+
+	for name, verified := range map[string]bool{
+		"IdP-created user is verified at creation": true,
+		"email signup is not yet verified":         false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			k8s := fake.NewClientBuilder().
+				WithScheme(newTestScheme()).
+				WithStatusSubresource(&iamv1alpha1.User{}).
+				Build()
+			s := &Server{
+				config:            NewServerConfig(),
+				k8sClient:         k8s,
+				validateSignature: func([]byte, string, string) error { return nil },
+				zitadelClient: &mockZitadelAPI{
+					getUserByIDFunc: func(_ context.Context, id string) (*zitadel.User, error) {
+						return &zitadel.User{ID: id, Email: "jane@example.com", IsEmailVerified: verified}, nil
+					},
+				},
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/actions/create-user-account", bytes.NewBufferString(body))
+			rr := httptest.NewRecorder()
+			s.createUserAccountHandler(rr, req)
+
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("expected 201, got %d (%s)", rr.Code, rr.Body.String())
+			}
+			got := &iamv1alpha1.User{}
+			if err := k8s.Get(context.Background(), client.ObjectKey{Name: "362926680773230861"}, got); err != nil {
+				t.Fatalf("get user: %v", err)
+			}
+			if emailverified.IsTrue(got) != verified {
+				t.Errorf("EmailVerified = %v, want %v", emailverified.IsTrue(got), verified)
+			}
+		})
+	}
+}
+
+// Best effort: a Zitadel hiccup must never fail the provisioning ack, because
+// Zitadel would retry the whole create. The sweeper reconciles it instead.
+func TestCreateUserAccountHandler_EmailVerifiedFailureDoesNotFailProvisioning(t *testing.T) {
+	const body = `{
+		"aggregateID": "362926680773230861",
+		"event_type": "user.human.added",
+		"created_at": "2026-06-05T12:00:00Z",
+		"userID": "362926680773230861",
+		"event_payload": {"firstName":"Jane","lastName":"Doe","email":"jane@example.com"}
+	}`
+
+	k8s := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithStatusSubresource(&iamv1alpha1.User{}).
+		Build()
+	s := &Server{
+		config:            NewServerConfig(),
+		k8sClient:         k8s,
+		validateSignature: func([]byte, string, string) error { return nil },
+		zitadelClient: &mockZitadelAPI{
+			getUserByIDFunc: func(context.Context, string) (*zitadel.User, error) {
+				return nil, errors.New("zitadel unreachable")
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/create-user-account", bytes.NewBufferString(body))
+	rr := httptest.NewRecorder()
+	s.createUserAccountHandler(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 despite the Zitadel error, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// A nil client is the startup window before the background initializer installs one.
+func TestCreateUserAccountHandler_NoZitadelClientStillProvisions(t *testing.T) {
+	const body = `{
+		"aggregateID": "362926680773230861",
+		"event_type": "user.human.added",
+		"created_at": "2026-06-05T12:00:00Z",
+		"userID": "362926680773230861",
+		"event_payload": {"firstName":"Jane","lastName":"Doe","email":"jane@example.com"}
+	}`
+
+	k8s := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithStatusSubresource(&iamv1alpha1.User{}).
+		Build()
+	s := &Server{
+		config:            NewServerConfig(),
+		k8sClient:         k8s,
+		validateSignature: func([]byte, string, string) error { return nil },
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/create-user-account", bytes.NewBufferString(body))
+	rr := httptest.NewRecorder()
+	s.createUserAccountHandler(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d (%s)", rr.Code, rr.Body.String())
 	}
 }

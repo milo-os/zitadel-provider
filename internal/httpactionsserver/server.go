@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	"go.miloapis.com/auth-provider-zitadel/internal/userprovision"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
@@ -204,6 +205,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/v1/actions/session-added", s.sessionAddedHandler)
 	mux.HandleFunc("/v1/actions/passkey-added", s.passkeyAddedHandler)
 	mux.HandleFunc("/v1/actions/passkey-removed", s.passkeyRemovedHandler)
+	mux.HandleFunc("/v1/actions/email-verified", s.emailVerifiedHandler)
 
 	srv := &http.Server{
 		Addr:    s.config.Addr,
@@ -296,6 +298,21 @@ func (s *Server) createUserAccountHandler(w http.ResponseWriter, r *http.Request
 		"userName", req.UserID,
 		"email", req.EventPayload.Email,
 	)
+
+	// C11: record the initial EmailVerified condition so the value is right from the
+	// first reconcile — IdP-created users are verified at creation and must not wait
+	// for a sweep to be welcomed. Best effort: never fail the provisioning ack over
+	// it, because Zitadel would retry the whole create. A miss self-heals on the next
+	// sweep, which reconciles the same condition from ListHumanUsers.
+	if zc := s.zitadelAPI(); zc != nil {
+		if zu, err := zc.GetUserByID(r.Context(), user.Name); err == nil {
+			if _, err := emailverified.Set(r.Context(), s.k8sClient, user.Name, zu.IsEmailVerified); err != nil {
+				log.Error(err, "initial EmailVerified skipped; sweeper will reconcile", "userName", user.Name)
+			}
+		} else {
+			log.Error(err, "initial EmailVerified skipped; sweeper will reconcile", "userName", user.Name)
+		}
+	}
 
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write([]byte("created"))
