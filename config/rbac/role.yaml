@@ -45,6 +45,7 @@ rules:
   - iam.miloapis.com
   resources:
   - serviceaccounts/status
+  - users/status
   verbs:
   - get
   - patch
