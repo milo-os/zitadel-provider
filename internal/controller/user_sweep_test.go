@@ -229,11 +229,15 @@ var _ = ginkgo.Describe("UserSweeper", func() {
 		})
 
 		ginkgo.It("issues no write when the field already agrees", func() {
-			statusUpdates := 0
+			statusUpdates, getCalls := 0, 0
 			k8sFake := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&iammiloapiscomv1alpha1.User{}).
 				WithObjects(userWith("u-agrees", emailverified.Desired(true))).
 				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						getCalls++
+						return c.Get(ctx, key, obj, opts...)
+					},
 					SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 						statusUpdates++
 						return c.Status().Update(ctx, obj, opts...)
@@ -246,6 +250,14 @@ var _ = ginkgo.Describe("UserSweeper", func() {
 
 			gomega.Expect(s.sweepOnce(sctx)).To(gomega.Succeed())
 
+			// The Get count is what proves the SWEEPER's own guard, and it is the only
+			// assertion here that does. emailverified.Set is independently idempotent —
+			// it re-reads, diffs, and declines to write — so statusUpdates stays zero
+			// even with the sweeper's NeedsUpdate check deleted. Set issues its Get
+			// BEFORE that inner diff, so a call that should never have happened shows
+			// up here and nowhere else.
+			gomega.Expect(getCalls).To(gomega.BeZero(),
+				"the sweeper must decide from its List cache; reaching the writer at all costs a Get per user per sweep")
 			gomega.Expect(statusUpdates).To(gomega.BeZero(),
 				"an unconditional write would add one status update per human user every ten minutes")
 		})
