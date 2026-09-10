@@ -45,9 +45,9 @@ type ServerConfig struct {
 	// empty value disables the notification (unconfigured means skip).
 	PasskeyAddedEmailTemplate string
 	// PasskeyRemovedEmailTemplate is the EmailTemplate used to notify users
-	// when a passkey is removed from their account. An empty value disables the
-	// notification (unconfigured means skip), matching
-	// PasskeyAddedEmailTemplate.
+	// when a passkey is removed from their account. Defaults to the
+	// conventional generated name; an empty value disables the notification
+	// (unconfigured means skip), matching PasskeyAddedEmailTemplate.
 	PasskeyRemovedEmailTemplate string
 	// NotificationNamespace is the namespace in which Email resources are created.
 	NotificationNamespace string
@@ -75,6 +75,7 @@ func NewServerConfig() *ServerConfig {
 		DisableSignatureValidation:   false,
 		SuspiciousLoginEmailTemplate: "emailtemplates.notification.miloapis.com-usersuspiciousemailtemplate",
 		PasskeyAddedEmailTemplate:    "emailtemplates.notification.miloapis.com-userpasskeyaddedemailtemplate",
+		PasskeyRemovedEmailTemplate:  "emailtemplates.notification.miloapis.com-userpasskeyremovedemailtemplate",
 		NotificationNamespace:        "milo-system",
 		GraphQLGatewayURL:            "https://graphql-gateway.graphql-gateway.svc.cluster.local:4000/graphql",
 		GraphQLGatewayCACertFile:     "/etc/ssl/certs/datum-ca.crt",

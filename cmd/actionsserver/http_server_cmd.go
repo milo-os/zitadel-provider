@@ -138,6 +138,7 @@ If a TLS certificate and key are provided, the server will start in HTTPS mode. 
 	// Notification flags
 	cmd.Flags().StringVar(&cfg.SuspiciousLoginEmailTemplate, "suspicious-login-email-template", cfg.SuspiciousLoginEmailTemplate, "Name of the EmailTemplate cluster resource used for suspicious login notifications")
 	cmd.Flags().StringVar(&cfg.PasskeyAddedEmailTemplate, "passkey-added-email-template", cfg.PasskeyAddedEmailTemplate, "Name of the EmailTemplate cluster resource used for passkey-added notifications")
+	cmd.Flags().StringVar(&cfg.PasskeyRemovedEmailTemplate, "passkey-removed-email-template", cfg.PasskeyRemovedEmailTemplate, "Name of the EmailTemplate cluster resource used for passkey-removed notifications")
 	cmd.Flags().StringVar(&cfg.NotificationNamespace, "notification-namespace", cfg.NotificationNamespace, "Namespace in which Email resources are created")
 
 	// GraphQL Gateway flags
