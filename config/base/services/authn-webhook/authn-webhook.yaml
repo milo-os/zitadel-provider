@@ -42,6 +42,10 @@ spec:
             - --email-verification-template=$(EMAIL_VERIFICATION_TEMPLATE)
             - --email-verification-allowed-origins=$(EMAIL_VERIFICATION_ALLOWED_ORIGINS)
             - --email-verification-expiry-minutes=$(EMAIL_VERIFICATION_EXPIRY_MINUTES)
+            - --account-recovery-template=$(ACCOUNT_RECOVERY_TEMPLATE)
+            - --account-recovery-support-template=$(ACCOUNT_RECOVERY_SUPPORT_TEMPLATE)
+            - --account-recovery-allowed-origins=$(ACCOUNT_RECOVERY_ALLOWED_ORIGINS)
+            - --account-recovery-expiry-minutes=$(ACCOUNT_RECOVERY_EXPIRY_MINUTES)
             - --notification-namespace=$(NOTIFICATION_NAMESPACE)
           env:
             - name: WEBHOOK_PORT
@@ -70,6 +74,17 @@ spec:
             - name: CLIENT_CA_FILE
               value: ""
             - name: EMAIL_VERIFICATION_EXPIRY_MINUTES
+              value: "60"
+            # Empty leaves the recovery endpoint unregistered; an overlay opts in.
+            # Setting the template also makes CLIENT_CA_FILE mandatory: the binary
+            # refuses to start without it rather than serve the endpoint unauthenticated.
+            - name: ACCOUNT_RECOVERY_TEMPLATE
+              value: ""
+            - name: ACCOUNT_RECOVERY_SUPPORT_TEMPLATE
+              value: ""
+            - name: ACCOUNT_RECOVERY_ALLOWED_ORIGINS
+              value: ""
+            - name: ACCOUNT_RECOVERY_EXPIRY_MINUTES
               value: "60"
             - name: NOTIFICATION_NAMESPACE
               value: milo-system
