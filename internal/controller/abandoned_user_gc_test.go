@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,6 +33,19 @@ type reaper struct {
 	// which is what a password-only signup looks like.
 	idpLinks   map[string][]zitadel.IDPLink
 	idpLinkErr error
+	// authMethods maps user ID to the Zitadel AuthenticationMethodType names
+	// backing the C9 gauge. Absent means none enrolled.
+	authMethods     map[string][]string
+	authMethodErr   error
+	authMethodCalls int
+}
+
+func (r *reaper) ListAuthMethodTypes(_ context.Context, userID string) ([]string, error) {
+	r.authMethodCalls++
+	if r.authMethodErr != nil {
+		return nil, r.authMethodErr
+	}
+	return r.authMethods[userID], nil
 }
 
 func (r *reaper) ListIDPLinks(_ context.Context, userID string) ([]zitadel.IDPLink, error) {
@@ -314,5 +329,82 @@ func TestAbandonedGC_SkipsWhenIDPLinksUnreadable(t *testing.T) {
 	}
 	if !miloUserExists(t, c, "u1") {
 		t.Fatal("milo User must survive an unreadable link list")
+	}
+}
+
+// C9: the stranded class — verified email, but no credential that can sign in.
+// These accounts are reachable only through recovery, so they are counted, never
+// collected (spec §6). Revisit trigger: 50.
+func TestSweepOnce_VerifiedNoCredentialGauge(t *testing.T) {
+	// Arrange: three verified users, one of each credential shape, plus an
+	// unverified one that the gauge must ignore entirely.
+	users := []zitadel.User{
+		{ID: "u-passkey", Email: "a@example.com", IsEmailVerified: true, CreatedAt: gcNow},
+		{ID: "u-password", Email: "b@example.com", IsEmailVerified: true, CreatedAt: gcNow},
+		{ID: "u-otp-only", Email: "c@example.com", IsEmailVerified: true, CreatedAt: gcNow},
+		{ID: "u-unverified", Email: "d@example.com", IsEmailVerified: false, CreatedAt: gcNow},
+	}
+	g, _, _ := newGC(t, users, true)
+	r := g.Zitadel.(*reaper)
+	r.authMethods = map[string][]string{
+		"u-passkey":  {"AUTHENTICATION_METHOD_TYPE_PASSKEY"},
+		"u-password": {"AUTHENTICATION_METHOD_TYPE_PASSWORD"},
+		// otpEmail is enrolled on every Phase B account and is not a login
+		// method (C2), so this user has nothing that can sign in.
+		"u-otp-only": {"AUTHENTICATION_METHOD_TYPE_OTP_EMAIL"},
+	}
+
+	// Act
+	if err := g.sweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweepOnce: %v", err)
+	}
+
+	// Assert
+	if got := testutil.ToFloat64(verifiedNoCredential); got != 1 {
+		t.Errorf("zitadel_provider_verified_no_credential_accounts = %v, want 1", got)
+	}
+	// Only verified users cost an RPC — one per verified user per GC interval.
+	if r.authMethodCalls != 3 {
+		t.Errorf("ListAuthMethodTypes calls = %d, want 3 (verified users only)", r.authMethodCalls)
+	}
+}
+
+// An IdP link is a usable credential even with no local method enrolled.
+func TestSweepOnce_IDPLinkCountsAsCredential(t *testing.T) {
+	users := []zitadel.User{
+		{ID: "u-idp", Email: "a@example.com", IsEmailVerified: true, CreatedAt: gcNow},
+	}
+	g, _, _ := newGC(t, users, true)
+	r := g.Zitadel.(*reaper)
+	r.authMethods = map[string][]string{"u-idp": {"AUTHENTICATION_METHOD_TYPE_IDP"}}
+
+	if err := g.sweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweepOnce: %v", err)
+	}
+
+	if got := testutil.ToFloat64(verifiedNoCredential); got != 0 {
+		t.Errorf("gauge = %v, want 0: an IdP link is a usable credential", got)
+	}
+}
+
+// An unreadable method list is not evidence of no credential. Skip, do not count.
+func TestSweepOnce_AuthMethodErrorSkipsRatherThanCounts(t *testing.T) {
+	users := []zitadel.User{
+		{ID: "u-verified", Email: "a@example.com", IsEmailVerified: true, CreatedAt: gcNow},
+	}
+	g, _, _ := newGC(t, users, true)
+	r := g.Zitadel.(*reaper)
+	r.authMethodErr = errors.New("zitadel unreachable")
+
+	before := testutil.ToFloat64(abandonedErrors)
+	if err := g.sweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweepOnce must not abort on an auth-method error: %v", err)
+	}
+
+	if got := testutil.ToFloat64(verifiedNoCredential); got != 0 {
+		t.Errorf("gauge = %v, want 0: an RPC error must not be read as 'no credential'", got)
+	}
+	if testutil.ToFloat64(abandonedErrors)-before != 1 {
+		t.Error("the skipped RPC should have incremented abandonedErrors")
 	}
 }
