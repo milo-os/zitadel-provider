@@ -1119,6 +1119,41 @@ func TestCreateUserAccountHandler_EmailVerifiedFailureDoesNotFailProvisioning(t 
 	}
 }
 
+// GetUserByID reports a missing user as (nil, nil), not as an error. The handler
+// must treat that as a miss like any other, not dereference it.
+func TestCreateUserAccountHandler_NilUserFromZitadelStillProvisions(t *testing.T) {
+	const body = `{
+		"aggregateID": "362926680773230861",
+		"event_type": "user.human.added",
+		"created_at": "2026-06-05T12:00:00Z",
+		"userID": "362926680773230861",
+		"event_payload": {"firstName":"Jane","lastName":"Doe","email":"jane@example.com"}
+	}`
+
+	k8s := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithStatusSubresource(&iamv1alpha1.User{}).
+		Build()
+	s := &Server{
+		config:            NewServerConfig(),
+		k8sClient:         k8s,
+		validateSignature: func([]byte, string, string) error { return nil },
+		zitadelClient: &mockZitadelAPI{
+			getUserByIDFunc: func(context.Context, string) (*zitadel.User, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/create-user-account", bytes.NewBufferString(body))
+	rr := httptest.NewRecorder()
+	s.createUserAccountHandler(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 despite the missing Zitadel user, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
 // A nil client is the startup window before the background initializer installs one.
 func TestCreateUserAccountHandler_NoZitadelClientStillProvisions(t *testing.T) {
 	const body = `{

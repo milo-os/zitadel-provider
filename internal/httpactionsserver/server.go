@@ -305,7 +305,7 @@ func (s *Server) createUserAccountHandler(w http.ResponseWriter, r *http.Request
 	// it, because Zitadel would retry the whole create. A miss self-heals on the next
 	// sweep, which reconciles the same field from ListHumanUsers.
 	if zc := s.zitadelAPI(); zc != nil {
-		if zu, err := zc.GetUserByID(r.Context(), user.Name); err == nil {
+		if zu, err := zc.GetUserByID(r.Context(), user.Name); err == nil && zu != nil {
 			if _, err := emailverified.Set(r.Context(), s.k8sClient, user.Name, zu.IsEmailVerified); err != nil {
 				log.Error(err, "initial EmailVerification skipped; sweeper will reconcile", "userName", user.Name)
 			}
