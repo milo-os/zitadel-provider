@@ -16,11 +16,11 @@ const (
 )
 
 func Denied(reason string) Response {
-	return authenticationResponse(false, "", "", reason, iammiloapiscomv1alpha1.RegistrationApprovalStateRejected, nil)
+	return authenticationResponse(false, "", "", reason, iammiloapiscomv1alpha1.PlatformAccessStateRejected, nil)
 }
 
 func Errored(err error) Response {
-	return authenticationResponse(false, "", "", err.Error(), iammiloapiscomv1alpha1.RegistrationApprovalStateRejected, nil)
+	return authenticationResponse(false, "", "", err.Error(), iammiloapiscomv1alpha1.PlatformAccessStateRejected, nil)
 }
 
 // Allowed builds an authenticated TokenReview response for the given identity.
@@ -28,10 +28,10 @@ func Errored(err error) Response {
 // Pass a non-nil emailVerified for human identities and nil for machines. Never
 // pass nil to mean "could not determine" — an absent key admits.
 func Allowed(username, uid string, emailVerified *bool) Response {
-	return authenticationResponse(true, username, uid, "", iammiloapiscomv1alpha1.RegistrationApprovalStateApproved, emailVerified)
+	return authenticationResponse(true, username, uid, "", iammiloapiscomv1alpha1.PlatformAccessStateApproved, emailVerified)
 }
 
-func authenticationResponse(authenticated bool, username, uid, evaluationError string, state iammiloapiscomv1alpha1.RegistrationApprovalState, emailVerified *bool) Response {
+func authenticationResponse(authenticated bool, username, uid, evaluationError string, state iammiloapiscomv1alpha1.PlatformAccessState, emailVerified *bool) Response {
 	extra := map[string]authenticationv1.ExtraValue{
 		registrationApprovalExtraKey: {string(state)},
 	}
