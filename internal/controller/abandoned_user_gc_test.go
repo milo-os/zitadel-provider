@@ -35,13 +35,19 @@ type reaper struct {
 	idpLinkErr error
 	// authMethods maps user ID to the Zitadel AuthenticationMethodType names
 	// backing the C9 gauge. Absent means none enrolled.
-	authMethods     map[string][]string
+	authMethods map[string][]string
+	// authMethodErrs fails the lookup for named users only; authMethodErr fails
+	// it for every user.
+	authMethodErrs  map[string]error
 	authMethodErr   error
 	authMethodCalls int
 }
 
 func (r *reaper) ListAuthMethodTypes(_ context.Context, userID string) ([]string, error) {
 	r.authMethodCalls++
+	if err := r.authMethodErrs[userID]; err != nil {
+		return nil, err
+	}
 	if r.authMethodErr != nil {
 		return nil, r.authMethodErr
 	}
@@ -108,6 +114,15 @@ func newGC(t *testing.T, users []zitadel.User, dryRun bool) (*AbandonedUserGC, *
 
 func unverified(id string, ageDays int) zitadel.User {
 	return zitadel.User{ID: id, Email: id + "@example.test", CreatedAt: gcNow.AddDate(0, 0, -ageDays)}
+}
+
+// verifiedAged is a verified account old enough to be past the retention window,
+// so the only thing standing between it and the reaper is isAbandoned's
+// IsEmailVerified check.
+func verifiedAged(id string, ageDays int) zitadel.User {
+	u := unverified(id, ageDays)
+	u.IsEmailVerified = true
+	return u
 }
 
 func miloUserExists(t *testing.T, c client.Client, name string) bool {
@@ -406,5 +421,72 @@ func TestSweepOnce_AuthMethodErrorSkipsRatherThanCounts(t *testing.T) {
 	}
 	if testutil.ToFloat64(abandonedErrors)-before != 1 {
 		t.Error("the skipped RPC should have incremented abandonedErrors")
+	}
+}
+
+// The gauge branch reads auth methods for every VERIFIED account, and review of
+// #140 asked to be shown — not told — that a bug in that read cannot delete a
+// healthy account. It cannot: the branch only counts, and the delete path is
+// still gated solely by isAbandoned, which returns false for anything verified.
+//
+// Every hasUsableCredential outcome is represented, all four verified accounts
+// are older than the retention window so age is not what saves them, and DryRun
+// is off so the delete path is live. The unverified account is the control: it
+// IS collected, which proves the sweep really ran and that the silence above it
+// is the predicate holding rather than a no-op.
+func TestSweepOnce_GaugeNeverDeletes(t *testing.T) {
+	// Arrange
+	verifiedIDs := []string{"v-no-methods", "v-otp-only", "v-passkey", "v-methods-error"}
+	users := []zitadel.User{
+		verifiedAged("v-no-methods", 60),    // nothing enrolled at all
+		verifiedAged("v-otp-only", 60),      // enrolled, but nothing that can sign in
+		verifiedAged("v-passkey", 60),       // a usable credential
+		verifiedAged("v-methods-error", 60), // the lookup itself fails
+		unverified("u-abandoned", 60),       // control: genuinely collectable
+	}
+	g, calls, c := newGC(t, users, false)
+	r := g.Zitadel.(*reaper)
+	r.authMethods = map[string][]string{
+		"v-otp-only": {"AUTHENTICATION_METHOD_TYPE_OTP_EMAIL"},
+		"v-passkey":  {"AUTHENTICATION_METHOD_TYPE_PASSKEY"},
+	}
+	r.authMethodErrs = map[string]error{"v-methods-error": errors.New("zitadel unreachable")}
+
+	deletedBefore := testutil.ToFloat64(abandonedDeleted)
+	eligibleBefore := testutil.ToFloat64(abandonedEligible)
+
+	// Act
+	sweep(t, g)
+
+	// Assert. The call log is exhaustive across both systems, so an exact match
+	// answers the review's question outright: every entry beyond the control is a
+	// verified account that the gauge branch would have wrongly collected.
+	if got := *calls; len(got) != 2 || got[0] != "zitadel:u-abandoned" || got[1] != "milo:u-abandoned" {
+		t.Fatalf("got %v, want [zitadel:u-abandoned milo:u-abandoned] — no verified account may reach the delete path", got)
+	}
+	for _, id := range verifiedIDs {
+		if !miloUserExists(t, c, id) {
+			t.Errorf("milo User %q must survive: the C9 gauge counts, it never collects", id)
+		}
+	}
+	if got := testutil.ToFloat64(abandonedDeleted) - deletedBefore; got != 1 {
+		t.Errorf("abandonedDeleted rose by %v, want 1: the verified accounts must contribute none", got)
+	}
+	if got := testutil.ToFloat64(abandonedEligible) - eligibleBefore; got != 1 {
+		t.Errorf("abandonedEligible rose by %v, want 1: a verified account must never be eligible", got)
+	}
+	if miloUserExists(t, c, "u-abandoned") {
+		t.Error("the unverified control must still be collected, or this test proves nothing")
+	}
+
+	// And the gauge still did its own job, over exactly the verified accounts:
+	// two of them have no usable credential, and the failed lookup is not counted
+	// as one.
+	if got := testutil.ToFloat64(verifiedNoCredential); got != 2 {
+		t.Errorf("gauge = %v, want 2 (v-no-methods and v-otp-only)", got)
+	}
+	if r.authMethodCalls != len(verifiedIDs) {
+		t.Errorf("ListAuthMethodTypes calls = %d, want %d: every verified account went through the gauge branch and still survived",
+			r.authMethodCalls, len(verifiedIDs))
 	}
 }
