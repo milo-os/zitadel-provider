@@ -1059,6 +1059,7 @@ func TestCreateUserAccountHandler_SetsInitialEmailVerified(t *testing.T) {
 				k8sClient:         k8s,
 				validateSignature: func([]byte, string, string) error { return nil },
 				zitadelClient: &mockZitadelAPI{
+					// Mirrors SDKClient.GetUserByID, which maps IsEmailVerified off the human email.
 					getUserByIDFunc: func(_ context.Context, id string) (*zitadel.User, error) {
 						return &zitadel.User{ID: id, Email: "jane@example.com", IsEmailVerified: verified}, nil
 					},
