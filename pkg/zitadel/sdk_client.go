@@ -361,6 +361,43 @@ func (c *SDKClient) ListPasskeys(ctx context.Context, userID string) ([]Passkey,
 	return out, nil
 }
 
+// CreatePasskeyRegistrationLink asks Zitadel for a single-use passkey registration code
+// (the passwordless init code) and RETURNS it instead of letting Zitadel mail it: every
+// email leaves through the Datum pipeline, never Zitadel SMTP. The code is a bearer
+// credential — it is never logged here.
+func (c *SDKClient) CreatePasskeyRegistrationLink(ctx context.Context, userID string) (string, string, error) {
+	klog.V(2).Infof("CreatePasskeyRegistrationLink: userID=%q", userID)
+
+	resp, err := c.user.CreatePasskeyRegistrationLink(ctx, &userv2.CreatePasskeyRegistrationLinkRequest{
+		UserId: userID,
+		Medium: &userv2.CreatePasskeyRegistrationLinkRequest_ReturnCode{ReturnCode: &userv2.ReturnPasskeyRegistrationCode{}},
+	})
+	if err != nil {
+		klog.Errorf("CreatePasskeyRegistrationLink: API call failed for userID=%q: %v", userID, err)
+		return "", "", fmt.Errorf("create passkey registration link: %w", err)
+	}
+
+	code := resp.GetCode()
+	if code == nil || code.GetCode() == "" {
+		return "", "", fmt.Errorf("create passkey registration link: empty code in response")
+	}
+	return code.GetId(), code.GetCode(), nil
+}
+
+// ListAuthMethodTypes returns the names of the user's authentication method types.
+func (c *SDKClient) ListAuthMethodTypes(ctx context.Context, userID string) ([]string, error) {
+	resp, err := c.user.ListAuthenticationMethodTypes(ctx, &userv2.ListAuthenticationMethodTypesRequest{UserId: userID})
+	if err != nil {
+		return nil, fmt.Errorf("list authentication method types: %w", err)
+	}
+
+	out := make([]string, 0, len(resp.GetAuthMethodTypes()))
+	for _, t := range resp.GetAuthMethodTypes() {
+		out = append(out, t.String())
+	}
+	return out, nil
+}
+
 // ListUserMetadata returns every metadata entry on a Zitadel user. Values are
 // returned decoded; Zitadel stores and transports them as bytes.
 func (c *SDKClient) ListUserMetadata(ctx context.Context, userID string) ([]UserMetadata, error) {

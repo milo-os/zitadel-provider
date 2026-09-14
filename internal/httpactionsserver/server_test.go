@@ -27,6 +27,8 @@ import (
 type mockZitadelAPI struct {
 	listSessionsFunc     func(ctx context.Context, userID string) ([]zitadel.Session, error)
 	listUserMetadataFunc func(ctx context.Context, userID string) ([]zitadel.UserMetadata, error)
+	authMethodTypesFunc  func(ctx context.Context, userID string) ([]string, error)
+	registrationLinkFunc func(ctx context.Context, userID string) (string, string, error)
 }
 
 // ListUserMetadata backs A-PR2's passkey-name lookup. Left nil it returns
@@ -55,6 +57,20 @@ func (m *mockZitadelAPI) ListIDPLinks(ctx context.Context, userID string) ([]zit
 	return nil, nil
 }
 func (m *mockZitadelAPI) ListPasskeys(ctx context.Context, userID string) ([]zitadel.Passkey, error) {
+	return nil, nil
+}
+
+func (m *mockZitadelAPI) CreatePasskeyRegistrationLink(ctx context.Context, userID string) (string, string, error) {
+	if m.registrationLinkFunc != nil {
+		return m.registrationLinkFunc(ctx, userID)
+	}
+	return "code-id-1", "K7QM2XD4", nil
+}
+
+func (m *mockZitadelAPI) ListAuthMethodTypes(ctx context.Context, userID string) ([]string, error) {
+	if m.authMethodTypesFunc != nil {
+		return m.authMethodTypesFunc(ctx, userID)
+	}
 	return nil, nil
 }
 func (m *mockZitadelAPI) CreateOrganization(ctx context.Context, name string) (string, error) {

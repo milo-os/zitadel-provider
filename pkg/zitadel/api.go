@@ -118,6 +118,12 @@ type API interface {
 	// passkey management
 	ListPasskeys(ctx context.Context, userID string) ([]Passkey, error)
 
+	// passkey registration (Phase C recovery)
+	CreatePasskeyRegistrationLink(ctx context.Context, userID string) (codeID, code string, err error)
+	// ListAuthMethodTypes returns Zitadel's AuthenticationMethodType names for the user,
+	// e.g. AUTHENTICATION_METHOD_TYPE_PASSKEY. Used by the C9 gauge.
+	ListAuthMethodTypes(ctx context.Context, userID string) ([]string, error)
+
 	// organization management
 	CreateOrganization(ctx context.Context, name string) (orgID string, err error)
 	CreateOrganizationWithID(ctx context.Context, name, customOrgID string) (orgID string, err error)
