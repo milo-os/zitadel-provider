@@ -5,7 +5,7 @@ services:
     restart: 'always'
     networks:
       - 'zitadel'
-    image: 'ghcr.io/zitadel/zitadel:v3.3.0'
+    image: 'ghcr.io/zitadel/zitadel:v4.17.3'
     command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters" --tlsMode disabled'
     environment:
       ZITADEL_DATABASE_POSTGRES_HOST: db
