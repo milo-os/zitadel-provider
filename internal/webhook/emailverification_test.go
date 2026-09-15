@@ -3,12 +3,16 @@ package webhook
 import (
 	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-logr/logr"
 
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	notificationv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
@@ -19,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -357,17 +362,75 @@ func TestEmailVerification_DifferentCodeSendsAnotherMail(t *testing.T) {
 func TestEmailVerification_CreateFailureDoesNotEchoCode(t *testing.T) {
 	h, _ := newHandlerWith(t, baseConfig(), interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			return errors.New(`admission denied for Email with Variables [{Code ABC123}]`)
+			return apierrors.NewBadRequest(`admission denied for Email with Variables [{Code ABC123}]`)
 		},
 	}, testUser())
 
-	rec := post(t, h, goodBody)
+	rec, logged := postCapturingLog(t, h, goodBody)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", rec.Code)
 	}
 	if strings.Contains(rec.Body.String(), "ABC123") {
 		t.Fatalf("response echoed the verification code: %q", rec.Body.String())
+	}
+	if strings.Contains(logged, "ABC123") {
+		t.Fatalf("log echoed the verification code: %q", logged)
+	}
+}
+
+// The dangerous case the type check exists for: a StatusError carrying no Reason. It
+// still quotes the rejected object, so emptiness of Reason must not route it to the
+// raw-error branch.
+func TestEmailVerification_ReasonlessStatusErrorIsStillRedacted(t *testing.T) {
+	h, _ := newHandlerWith(t, baseConfig(), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			return &apierrors.StatusError{ErrStatus: metav1.Status{
+				Status:  metav1.StatusFailure,
+				Code:    http.StatusInternalServerError,
+				Message: `Internal error occurred: Email with Variables [{Code ABC123}]`,
+			}}
+		},
+	}, testUser())
+
+	rec, logged := postCapturingLog(t, h, goodBody)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+	if strings.Contains(logged, "ABC123") {
+		t.Fatalf("log echoed the code from a reason-less StatusError: %q", logged)
+	}
+	if !strings.Contains(logged, "code 500") {
+		t.Fatalf("log dropped the status code, leaving nothing to diagnose: %q", logged)
+	}
+}
+
+// A transport failure never reached admission, so it cannot quote the request — and it
+// is the only thing that explains a timeout. Logging it as an empty "rejection" is how
+// a 15s staging failure became undiagnosable.
+func TestEmailVerification_TransportErrorIsLoggedInFull(t *testing.T) {
+	transport := &url.Error{
+		Op:  "Post",
+		URL: "https://milo.example.test/apis/notification.miloapis.com/v1alpha1/namespaces/default/emails",
+		Err: context.DeadlineExceeded,
+	}
+	h, _ := newHandlerWith(t, baseConfig(), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			return transport
+		},
+	}, testUser())
+
+	rec, logged := postCapturingLog(t, h, goodBody)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+	if !strings.Contains(logged, "context deadline exceeded") {
+		t.Fatalf("transport cause was dropped from the log: %q", logged)
+	}
+	if strings.Contains(logged, "apiserver rejected") {
+		t.Fatalf("transport failure was mislabelled as an apiserver rejection: %q", logged)
 	}
 }
 
@@ -406,4 +469,42 @@ func TestEmailVerification_MethodNotAllowedAdvertisesPost(t *testing.T) {
 	if got := rec.Header().Get("Allow"); got != http.MethodPost {
 		t.Fatalf("Allow = %q, want POST", got)
 	}
+}
+
+// capturingSink records what the handler logged. The response body is not the only
+// place a verification code can escape, so redaction needs asserting on both.
+type capturingSink struct {
+	mu   sync.Mutex
+	errs []string
+}
+
+func (s *capturingSink) Init(logr.RuntimeInfo)    {}
+func (s *capturingSink) Enabled(int) bool         { return true }
+func (s *capturingSink) Info(int, string, ...any) {}
+
+func (s *capturingSink) Error(err error, msg string, kv ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.errs = append(s.errs, fmt.Sprintf("%v | %s | %v", err, msg, kv))
+}
+
+func (s *capturingSink) WithValues(...any) logr.LogSink { return s }
+func (s *capturingSink) WithName(string) logr.LogSink   { return s }
+
+func (s *capturingSink) text() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.Join(s.errs, "\n")
+}
+
+// postCapturingLog is post() with a logger threaded through the request context, which
+// is where the handler reads it from.
+func postCapturingLog(t *testing.T, h *EmailVerificationHandler, body string) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	sink := &capturingSink{}
+	ctx := logf.IntoContext(context.Background(), logr.New(sink))
+	req := httptest.NewRequest(http.MethodPost, EmailVerificationEndpoint, bytes.NewBufferString(body)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec, sink.text()
 }

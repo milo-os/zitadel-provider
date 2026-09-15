@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -108,11 +109,22 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 
 	emailName, err := h.createEmail(r.Context(), user, req, actionURLFor(returnTo, req.Code, req.UserID))
 	if err != nil {
-		// Not the raw error: the code sits in this Email's Variables, and an apiserver
-		// rejection can echo a submitted value straight back. Reason is fixed vocabulary.
-		reason := apierrors.ReasonForError(err)
-		log.Error(fmt.Errorf("apiserver rejected Email create: %s", reason),
-			"Failed to create verification Email", "userId", req.UserID)
+		// The code sits in this Email's Variables, and an apiserver rejection can echo a
+		// submitted value straight back — so for those log only the fixed-vocabulary Reason
+		// and status code. A transport failure never reached admission and cannot quote the
+		// request, so it is logged whole: it is the only thing that explains a timeout.
+		//
+		// Discriminate on the type, not on Reason being empty. ReasonForError returns ""
+		// for BOTH a transport error and a StatusError whose Reason is unset (a bare 500),
+		// and that second one must still be redacted.
+		var status apierrors.APIStatus
+		if errors.As(err, &status) {
+			s := status.Status()
+			log.Error(fmt.Errorf("apiserver rejected Email create: %q (code %d)", s.Reason, s.Code),
+				"Failed to create verification Email", "userId", req.UserID)
+		} else {
+			log.Error(err, "Failed to create verification Email", "userId", req.UserID)
+		}
 		http.Error(w, "failed to create email", http.StatusInternalServerError)
 		return
 	}
