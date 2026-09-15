@@ -635,19 +635,25 @@ func (c *SDKClient) GetUserByID(ctx context.Context, userID string) (*User, erro
 		return nil, nil
 	}
 
-	// Extract email from HumanUser if available; otherwise leave empty for MachineUsers
+	// Extract email and its verification state from HumanUser if available; both stay
+	// zero for MachineUsers. IsEmailVerified must be mapped here and not only in
+	// ListHumanUsers: provisioning seeds the initial EmailVerification from this call,
+	// so dropping it would mark every new user Unverified until the first sweep.
 	var email string
+	var isEmailVerified bool
 	if humanUser := user.GetHuman(); humanUser != nil {
 		if emailObj := humanUser.GetEmail(); emailObj != nil {
 			email = emailObj.GetEmail()
+			isEmailVerified = emailObj.GetIsVerified()
 		}
 	}
 
 	result := &User{
-		ID:       user.GetUserId(),
-		Username: localIdentityUsername(user),
-		Email:    email,
-		State:    user.GetState().String(),
+		ID:              user.GetUserId(),
+		Username:        localIdentityUsername(user),
+		Email:           email,
+		State:           user.GetState().String(),
+		IsEmailVerified: isEmailVerified,
 	}
 	klog.V(2).Infof("GetUserByID: user id=%q found (username=%q)", result.ID, result.Username)
 	return result, nil

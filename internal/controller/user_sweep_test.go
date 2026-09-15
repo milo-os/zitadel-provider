@@ -15,6 +15,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
 
@@ -96,8 +99,18 @@ var _ = ginkgo.Describe("UserSweeper", func() {
 
 	ginkgo.It("diffs against a single List instead of per-user Gets", func() {
 		getCalls, listCalls := 0, 0
+		// u-existing already agrees with Zitadel (both unverified), which is the
+		// steady state after the first backfill: the EmailVerification reconcile must
+		// then issue no read of its own, so the sweep stays at one List per pass
+		// however many users exist (W0-C9).
 		k8sFake := fake.NewClientBuilder().WithScheme(scheme).
-			WithObjects(&iammiloapiscomv1alpha1.User{ObjectMeta: metav1.ObjectMeta{Name: "u-existing"}}).
+			WithStatusSubresource(&iammiloapiscomv1alpha1.User{}).
+			WithObjects(&iammiloapiscomv1alpha1.User{
+				ObjectMeta: metav1.ObjectMeta{Name: "u-existing"},
+				Status: iammiloapiscomv1alpha1.UserStatus{
+					EmailVerification: emailverified.Desired(false),
+				},
+			}).
 			WithInterceptorFuncs(interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					getCalls++
@@ -176,5 +189,123 @@ var _ = ginkgo.Describe("UserSweeper", func() {
 		k8sFake := fake.NewClientBuilder().WithScheme(scheme).Build()
 		s := &UserSweeper{Client: k8sFake, Zitadel: nil, Interval: 0}
 		gomega.Expect(s.Start(sctx)).To(gomega.Succeed())
+	})
+
+	// C11: the sweep is the backfill for every existing account and the self-heal for
+	// any missed event. It runs every 10 minutes and issues zero Kubernetes writes per
+	// existing user today, so it must diff before writing (W0-C9).
+	ginkgo.Context("EmailVerification reconcile", func() {
+		verifiedHuman := func(id, email string, verified bool) zitadel.User {
+			return zitadel.User{
+				ID: id, Email: email, GivenName: "G", FamilyName: "F",
+				State: "USER_STATE_ACTIVE", IsEmailVerified: verified,
+			}
+		}
+
+		userWith := func(name string, state iammiloapiscomv1alpha1.EmailVerificationState) *iammiloapiscomv1alpha1.User {
+			return &iammiloapiscomv1alpha1.User{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				Status:     iammiloapiscomv1alpha1.UserStatus{EmailVerification: state},
+			}
+		}
+
+		ginkgo.It("writes the field when it disagrees with Zitadel", func() {
+			before := testutil.ToFloat64(sweepEmailVerifiedUpdates)
+			k8sFake := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&iammiloapiscomv1alpha1.User{}).
+				WithObjects(userWith("u-stale", emailverified.Desired(false))).
+				Build()
+			lister := &mockUserLister{pages: [][]zitadel.User{{
+				verifiedHuman("u-stale", "a@example.com", true),
+			}}}
+			s := &UserSweeper{Client: k8sFake, Zitadel: lister}
+
+			gomega.Expect(s.sweepOnce(sctx)).To(gomega.Succeed())
+
+			var got iammiloapiscomv1alpha1.User
+			gomega.Expect(k8sFake.Get(sctx, types.NamespacedName{Name: "u-stale"}, &got)).To(gomega.Succeed())
+			gomega.Expect(emailverified.IsVerified(&got)).To(gomega.BeTrue())
+			gomega.Expect(testutil.ToFloat64(sweepEmailVerifiedUpdates) - before).To(gomega.Equal(1.0))
+		})
+
+		ginkgo.It("issues no write when the field already agrees", func() {
+			statusUpdates, getCalls := 0, 0
+			k8sFake := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&iammiloapiscomv1alpha1.User{}).
+				WithObjects(userWith("u-agrees", emailverified.Desired(true))).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						getCalls++
+						return c.Get(ctx, key, obj, opts...)
+					},
+					SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+						statusUpdates++
+						return c.Status().Update(ctx, obj, opts...)
+					},
+				}).Build()
+			lister := &mockUserLister{pages: [][]zitadel.User{{
+				verifiedHuman("u-agrees", "a@example.com", true),
+			}}}
+			s := &UserSweeper{Client: k8sFake, Zitadel: lister}
+
+			gomega.Expect(s.sweepOnce(sctx)).To(gomega.Succeed())
+
+			// The Get count is what proves the SWEEPER's own guard, and it is the only
+			// assertion here that does. emailverified.Set is independently idempotent —
+			// it re-reads, diffs, and declines to write — so statusUpdates stays zero
+			// even with the sweeper's NeedsUpdate check deleted. Set issues its Get
+			// BEFORE that inner diff, so a call that should never have happened shows
+			// up here and nowhere else.
+			gomega.Expect(getCalls).To(gomega.BeZero(),
+				"the sweeper must decide from its List cache; reaching the writer at all costs a Get per user per sweep")
+			gomega.Expect(statusUpdates).To(gomega.BeZero(),
+				"an unconditional write would add one status update per human user every ten minutes")
+		})
+
+		ginkgo.It("backfills a user whose field is unset", func() {
+			k8sFake := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&iammiloapiscomv1alpha1.User{}).
+				WithObjects(userWith("u-blank", "")).
+				Build()
+			lister := &mockUserLister{pages: [][]zitadel.User{{
+				verifiedHuman("u-blank", "a@example.com", true),
+			}}}
+			s := &UserSweeper{Client: k8sFake, Zitadel: lister}
+
+			gomega.Expect(s.sweepOnce(sctx)).To(gomega.Succeed())
+
+			var got iammiloapiscomv1alpha1.User
+			gomega.Expect(k8sFake.Get(sctx, types.NamespacedName{Name: "u-blank"}, &got)).To(gomega.Succeed())
+			gomega.Expect(emailverified.IsVerified(&got)).To(gomega.BeTrue())
+		})
+
+		ginkgo.It("does not abort the sweep when one field write fails", func() {
+			k8sFake := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&iammiloapiscomv1alpha1.User{}).
+				WithObjects(
+					userWith("u-a", emailverified.Desired(false)),
+					userWith("u-b", emailverified.Desired(false)),
+				).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+						if obj.GetName() == "u-a" {
+							return errors.New("boom")
+						}
+						return c.Status().Update(ctx, obj, opts...)
+					},
+				}).Build()
+			lister := &mockUserLister{pages: [][]zitadel.User{{
+				verifiedHuman("u-a", "a@example.com", true),
+				verifiedHuman("u-b", "b@example.com", true),
+			}}}
+			s := &UserSweeper{Client: k8sFake, Zitadel: lister}
+
+			// One user's failure must not strand the rest of the sweep.
+			gomega.Expect(s.sweepOnce(sctx)).To(gomega.Succeed())
+
+			var got iammiloapiscomv1alpha1.User
+			gomega.Expect(k8sFake.Get(sctx, types.NamespacedName{Name: "u-b"}, &got)).To(gomega.Succeed())
+			gomega.Expect(emailverified.IsVerified(&got)).To(gomega.BeTrue())
+		})
 	})
 })

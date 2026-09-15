@@ -11,6 +11,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	"go.miloapis.com/auth-provider-zitadel/internal/userprovision"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
@@ -38,10 +39,15 @@ var (
 		Name: "zitadel_provider_user_sweep_last_success_timestamp_seconds",
 		Help: "Unix time of the last fully successful sweep.",
 	})
+	sweepEmailVerifiedUpdates = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "zitadel_provider_user_sweep_email_verified_updates_total",
+		Help: "EmailVerification fields written by the sweeper because they disagreed with Zitadel.",
+	})
 )
 
 func init() {
-	metrics.Registry.MustRegister(sweepScanned, sweepMissing, sweepCreated, sweepErrors, sweepLastSuccess)
+	metrics.Registry.MustRegister(sweepScanned, sweepMissing, sweepCreated, sweepErrors, sweepLastSuccess,
+		sweepEmailVerifiedUpdates)
 }
 
 // ZitadelUserLister is the narrow slice of the pkg/zitadel API the sweeper
@@ -52,6 +58,7 @@ type ZitadelUserLister interface {
 }
 
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=users,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=iam.miloapis.com,resources=users/status,verbs=get;update;patch
 
 // UserSweeper periodically ensures every Zitadel human user has a User
 // resource on the core control plane. Create-only: it never deletes or
@@ -102,9 +109,9 @@ func (s *UserSweeper) sweepOnce(ctx context.Context) error {
 		sweepErrors.Inc()
 		return fmt.Errorf("list existing user resources: %w", err)
 	}
-	existing := make(map[string]struct{}, len(userList.Items))
+	existing := make(map[string]*iammiloapiscomv1alpha1.User, len(userList.Items))
 	for i := range userList.Items {
-		existing[userList.Items[i].Name] = struct{}{}
+		existing[userList.Items[i].Name] = &userList.Items[i]
 	}
 
 	var offset uint64
@@ -117,7 +124,25 @@ func (s *UserSweeper) sweepOnce(ctx context.Context) error {
 		for i := range users {
 			u := &users[i]
 			sweepScanned.Inc()
-			if _, ok := existing[u.ID]; ok {
+			if existingUser, ok := existing[u.ID]; ok {
+				// C11: reconcile the EmailVerification field. This is the backfill for
+				// every account that predates the writer, and the self-heal for any
+				// missed event. Diff against the User already in memory and write only
+				// on mismatch (W0-C9): the sweep runs every 10 minutes and issues zero
+				// Kubernetes writes per existing user today, so an unconditional write
+				// would add one status update per human user per sweep.
+				if emailverified.NeedsUpdate(existingUser, u.IsEmailVerified) {
+					changed, err := emailverified.Set(ctx, s.Client, u.ID, u.IsEmailVerified)
+					switch {
+					case err != nil:
+						// One user's failure must not strand the rest of the sweep:
+						// the next pass reconciles it.
+						sweepErrors.Inc()
+						log.Error(err, "Failed to reconcile EmailVerification field", "zitadelUserId", u.ID)
+					case changed:
+						sweepEmailVerifiedUpdates.Inc()
+					}
+				}
 				continue
 			}
 			sweepMissing.Inc()

@@ -9,17 +9,24 @@ import (
 	sessionv2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/session/v2"
 	userv2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user/v2"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeUserService stubs the gRPC UserServiceClient. Only the methods under
 // test are implemented; any other call panics via the embedded nil interface.
 type fakeUserService struct {
 	userv2.UserServiceClient
+	getUserByID  func(ctx context.Context, in *userv2.GetUserByIDRequest, opts ...grpc.CallOption) (*userv2.GetUserByIDResponse, error)
 	listUsers    func(ctx context.Context, in *userv2.ListUsersRequest, opts ...grpc.CallOption) (*userv2.ListUsersResponse, error)
 	listPasskeys func(ctx context.Context, in *userv2.ListPasskeysRequest, opts ...grpc.CallOption) (*userv2.ListPasskeysResponse, error)
 
 	createPasskeyRegistrationLink func(ctx context.Context, in *userv2.CreatePasskeyRegistrationLinkRequest, opts ...grpc.CallOption) (*userv2.CreatePasskeyRegistrationLinkResponse, error)
 	listAuthMethodTypes           func(ctx context.Context, in *userv2.ListAuthenticationMethodTypesRequest, opts ...grpc.CallOption) (*userv2.ListAuthenticationMethodTypesResponse, error)
+}
+
+func (f *fakeUserService) GetUserByID(ctx context.Context, in *userv2.GetUserByIDRequest, opts ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
+	return f.getUserByID(ctx, in, opts...)
 }
 
 func (f *fakeUserService) ListUsers(ctx context.Context, in *userv2.ListUsersRequest, opts ...grpc.CallOption) (*userv2.ListUsersResponse, error) {
@@ -49,6 +56,100 @@ func humanUser(id, username, email, given, family string, state userv2.UserState
 			Email:   &userv2.HumanEmail{Email: email},
 		}},
 	}
+}
+
+// humanUserWithEmail builds a human user whose email carries an explicit
+// verification flag; the shared humanUser helper leaves IsVerified at zero.
+func humanUserWithEmail(id, username, email string, verified bool) *userv2.User {
+	return &userv2.User{
+		UserId:             id,
+		Username:           username,
+		PreferredLoginName: username,
+		State:              userv2.UserState_USER_STATE_ACTIVE,
+		Type: &userv2.User_Human{Human: &userv2.HumanUser{
+			Email: &userv2.HumanEmail{Email: email, IsVerified: verified},
+		}},
+	}
+}
+
+func TestGetUserByID(t *testing.T) {
+	// The verified/unverified split is the point: provisioning seeds milo's initial
+	// EmailVerification from this call, so an unmapped flag would read as Unverified.
+	tests := []struct {
+		name string
+		user *userv2.User
+		want User
+	}{
+		{
+			name: "human with verified email",
+			user: humanUserWithEmail("u1", "alice", "alice@example.com", true),
+			want: User{ID: "u1", Username: "alice", Email: "alice@example.com", State: "USER_STATE_ACTIVE", IsEmailVerified: true},
+		},
+		{
+			name: "human with unverified email",
+			user: humanUserWithEmail("u2", "bob", "bob@example.com", false),
+			want: User{ID: "u2", Username: "bob", Email: "bob@example.com", State: "USER_STATE_ACTIVE", IsEmailVerified: false},
+		},
+		{
+			name: "machine user has no email and is never verified",
+			user: &userv2.User{
+				UserId: "m1", Username: "robot", PreferredLoginName: "robot",
+				State: userv2.UserState_USER_STATE_ACTIVE,
+				Type:  &userv2.User_Machine{Machine: &userv2.MachineUser{}},
+			},
+			want: User{ID: "m1", Username: "robot", State: "USER_STATE_ACTIVE"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			var gotReq *userv2.GetUserByIDRequest
+			c := &SDKClient{user: &fakeUserService{
+				getUserByID: func(_ context.Context, in *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
+					gotReq = in
+					return &userv2.GetUserByIDResponse{User: tt.user}, nil
+				},
+			}}
+
+			// Act
+			got, err := c.GetUserByID(context.Background(), tt.want.ID)
+
+			// Assert
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil {
+				t.Fatalf("expected a user, got nil")
+			}
+			if *got != tt.want {
+				t.Errorf("user = %+v, want %+v", *got, tt.want)
+			}
+			if gotReq.GetUserId() != tt.want.ID {
+				t.Errorf("requested user id = %q, want %q", gotReq.GetUserId(), tt.want.ID)
+			}
+		})
+	}
+
+	t.Run("not found returns no user and no error", func(t *testing.T) {
+		// Arrange
+		c := &SDKClient{user: &fakeUserService{
+			getUserByID: func(_ context.Context, _ *userv2.GetUserByIDRequest, _ ...grpc.CallOption) (*userv2.GetUserByIDResponse, error) {
+				return nil, status.Error(codes.NotFound, "user not found")
+			},
+		}}
+
+		// Act
+		got, err := c.GetUserByID(context.Background(), "missing")
+
+		// Assert
+		if err != nil {
+			t.Fatalf("NotFound must be swallowed, got error: %v", err)
+		}
+		if got != nil {
+			t.Fatalf("expected nil user, got %+v", got)
+		}
+	})
 }
 
 func TestListHumanUsers(t *testing.T) {
