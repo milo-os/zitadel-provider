@@ -63,22 +63,38 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 		"Retry count when the verification request arrives before create-user-account has provisioned the Milo User")
 	cmd.Flags().DurationVar(&cfg.EmailVerificationUserLookupBaseWait, "email-verification-user-lookup-base-wait", cfg.EmailVerificationUserLookupBaseWait,
 		"Initial backoff between email-verification user lookup retries")
+	// Account recovery flags. The user-lookup retry and the notification namespace are
+	// shared with verification: both endpoints race the same provisioning path and
+	// create Emails in the same place.
+	cmd.Flags().StringVar(&cfg.AccountRecoveryTemplate, "account-recovery-template", cfg.AccountRecoveryTemplate,
+		"EmailTemplate resource for self-serve account recovery mail; empty disables the endpoint")
+	cmd.Flags().StringVar(&cfg.AccountRecoverySupportTemplate, "account-recovery-support-template", cfg.AccountRecoverySupportTemplate,
+		"EmailTemplate resource for support-triggered account recovery mail")
+	cmd.Flags().StringSliceVar(&cfg.AccountRecoveryAllowedOrigins, "account-recovery-allowed-origins", nil,
+		"Allowlisted origins for returnTo, e.g. https://auth.example.net,http://localhost:3000")
+	cmd.Flags().IntVar(&cfg.AccountRecoveryExpiryMinutes, "account-recovery-expiry-minutes", cfg.AccountRecoveryExpiryMinutes,
+		"Recovery code lifetime shown to users; must match Zitadel's PasswordlessInitCode lifetime")
+
 	cmd.Flags().StringVar(&cfg.ClientCAFile, "client-ca-file", cfg.ClientCAFile,
 		"Filename in the directory that contains the CA bundle used to verify client certificates (mTLS)")
 
 	return cmd
 }
 
-// validateWebhookConfig rejects a configuration that would expose the verification
-// endpoint. Kept out of runWebhookServer so a test can reach it without a cluster.
+// validateWebhookConfig rejects a configuration that would expose a mail endpoint.
+// Kept out of runWebhookServer so a test can reach it without a cluster.
 func validateWebhookConfig(cfg *config.WebhookServerConfig) error {
 	// controller-runtime sets RequireAndVerifyClientCert only when ClientCAName is
-	// non-empty, so an empty --client-ca-file silently serves this endpoint with no
-	// client auth at all. Refuse to start rather than expose it: anyone able to reach
+	// non-empty, so an empty --client-ca-file silently serves these endpoints with no
+	// client auth at all. Refuse to start rather than expose them: anyone able to reach
 	// the Service could otherwise have us mail a code of their choosing.
 	if cfg.EmailVerificationTemplate != "" && cfg.ClientCAFile == "" {
 		return fmt.Errorf("--client-ca-file is required when --email-verification-template is set: " +
 			"without it the verification endpoint accepts unauthenticated callers")
+	}
+	if cfg.AccountRecoveryTemplate != "" && cfg.ClientCAFile == "" {
+		return fmt.Errorf("--client-ca-file is required when --account-recovery-template is set: " +
+			"without it the recovery endpoint accepts unauthenticated callers")
 	}
 	return nil
 }
@@ -157,13 +173,18 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 	webhookv1 := webhook.NewAuthenticationWebhookV1(introspector)
 	hookServer.Register(webhookv1.Endpoint, webhookv1)
 
-	if cfg.EmailVerificationTemplate != "" {
-		// Uncached client: this reads a single User per request. The manager's cached
-		// client would start an informer over every User for no benefit.
-		directClient, err := client.New(restConfig, client.Options{Scheme: runtimeScheme})
+	// Uncached client, shared by both mail endpoints: each reads a single User per
+	// request. The manager's cached client would start an informer over every User
+	// for no benefit. Built only when at least one endpoint is configured.
+	var directClient client.Client
+	if cfg.EmailVerificationTemplate != "" || cfg.AccountRecoveryTemplate != "" {
+		directClient, err = client.New(restConfig, client.Options{Scheme: runtimeScheme})
 		if err != nil {
 			return fmt.Errorf("failed to create client: %w", err)
 		}
+	}
+
+	if cfg.EmailVerificationTemplate != "" {
 		verify := webhook.NewEmailVerificationHandler(directClient, webhook.EmailVerificationConfig{
 			TemplateName:          cfg.EmailVerificationTemplate,
 			NotificationNamespace: cfg.NotificationNamespace,
@@ -178,6 +199,25 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 			"allowedOrigins", cfg.EmailVerificationAllowedOrigins)
 	} else {
 		log.Info("Email verification endpoint disabled; no template configured")
+	}
+
+	if cfg.AccountRecoveryTemplate != "" {
+		recovery := webhook.NewAccountRecoveryHandler(directClient, webhook.AccountRecoveryConfig{
+			TemplateName:          cfg.AccountRecoveryTemplate,
+			SupportTemplateName:   cfg.AccountRecoverySupportTemplate,
+			NotificationNamespace: cfg.NotificationNamespace,
+			AllowedOrigins:        cfg.AccountRecoveryAllowedOrigins,
+			ExpiryMinutes:         cfg.AccountRecoveryExpiryMinutes,
+			// Shared with verification: both race the same provisioning path.
+			UserLookupAttempts: cfg.EmailVerificationUserLookupAttempts,
+			UserLookupBaseWait: cfg.EmailVerificationUserLookupBaseWait,
+		})
+		hookServer.Register(recovery.Endpoint, recovery)
+		log.Info("Registered account recovery endpoint",
+			"endpoint", recovery.Endpoint,
+			"allowedOrigins", cfg.AccountRecoveryAllowedOrigins)
+	} else {
+		log.Info("Account recovery endpoint disabled; no template configured")
 	}
 
 	log.Info("Starting manager")

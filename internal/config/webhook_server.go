@@ -34,9 +34,25 @@ type WebhookServerConfig struct {
 	// EmailVerificationUserLookupBaseWait is the initial backoff between those
 	// retries.
 	EmailVerificationUserLookupBaseWait time.Duration
+	// AccountRecoveryTemplate is the EmailTemplate resource used for self-serve
+	// account-recovery mail. Empty disables the endpoint entirely — the route is not
+	// registered, so an unconfigured deployment cannot send.
+	AccountRecoveryTemplate string
+	// AccountRecoverySupportTemplate is the template whose copy says Datum Support
+	// sent the link. The request selects between the two names; it can never supply
+	// one, so a compromised caller cannot pick an arbitrary template.
+	AccountRecoverySupportTemplate string
+	// AccountRecoveryAllowedOrigins is the returnTo allowlist for recovery links.
+	// Empty rejects every request: a missing value must never read as "allow any host".
+	AccountRecoveryAllowedOrigins []string
+	// AccountRecoveryExpiryMinutes mirrors Zitadel's configured PasswordlessInitCode
+	// lifetime. It is a COPY of state we do not own; if the lifetime changes in
+	// Zitadel this number silently starts lying to users.
+	AccountRecoveryExpiryMinutes int
+
 	// ClientCAFile enables mTLS. Without it the endpoint would accept any caller that
-	// can reach the Service, so runWebhookServer refuses to start when the
-	// verification template is set and this is not.
+	// can reach the Service, so runWebhookServer refuses to start when either mail
+	// template is set and this is not.
 	//
 	// It is a FILENAME inside CertDir, not a path: controller-runtime joins the two.
 	ClientCAFile string
@@ -52,6 +68,7 @@ func NewWebhookServerConfig() *WebhookServerConfig {
 
 		NotificationNamespace:               "milo-system",
 		EmailVerificationExpiryMinutes:      60,
+		AccountRecoveryExpiryMinutes:        60,
 		EmailVerificationUserLookupAttempts: 5,
 		EmailVerificationUserLookupBaseWait: 200 * time.Millisecond,
 	}
