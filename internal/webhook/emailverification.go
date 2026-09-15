@@ -86,7 +86,7 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	// Parsed once here and reused for the action URL, so the value the allowlist
 	// approved is the value we build the link from.
 	returnTo, err := url.Parse(req.ReturnTo)
-	if err != nil || returnTo.Scheme == "" || returnTo.Host == "" || !h.originAllowed(returnTo) {
+	if err != nil || returnTo.Scheme == "" || returnTo.Host == "" || !originAllowed(returnTo, h.cfg.AllowedOrigins) {
 		// Deliberately does not echo the value: this is the phishing guard, and the
 		// rejected origin is attacker-controlled input.
 		log.Info("Rejected returnTo outside the allowlist", "userId", req.UserID)
@@ -94,7 +94,7 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	user, err := h.userWithRetry(r.Context(), req.UserID)
+	user, err := userWithRetry(r.Context(), h.client, req.UserID, h.cfg.UserLookupAttempts, h.cfg.UserLookupBaseWait)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("No User for verification mail", "userId", req.UserID)
@@ -125,8 +125,11 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 // originAllowed is the phishing guard: without it a compromised auth-ui could have
 // us mail a real, working code pointing at any domain. Compares scheme+host rather
 // than a prefix, which would admit "https://auth.example.test.evil.com".
-func (h *EmailVerificationHandler) originAllowed(u *url.URL) bool {
-	for _, allowed := range h.cfg.AllowedOrigins {
+//
+// Package-level and shared by every handler that mails a link: this control exists
+// once, or a fix to one copy leaves the other exploitable.
+func originAllowed(u *url.URL, allowedOrigins []string) bool {
+	for _, allowed := range allowedOrigins {
 		a, err := url.Parse(allowed)
 		if err != nil {
 			continue
@@ -145,12 +148,17 @@ func (h *EmailVerificationHandler) originAllowed(u *url.URL) bool {
 // behind the request.
 //
 // Backoff is linear rather than exponential: a caller is blocked on this response.
-func (h *EmailVerificationHandler) userWithRetry(ctx context.Context, id string) (*iamv1alpha1.User, error) {
-	attempts := h.cfg.UserLookupAttempts
+// Package-level and shared: both mail endpoints race the same provisioning path.
+func userWithRetry(
+	ctx context.Context,
+	c client.Client,
+	id string,
+	attempts int,
+	baseWait time.Duration,
+) (*iamv1alpha1.User, error) {
 	if attempts < 1 {
 		attempts = 1
 	}
-	baseWait := h.cfg.UserLookupBaseWait
 	if baseWait < 0 {
 		baseWait = 0
 	}
@@ -158,7 +166,7 @@ func (h *EmailVerificationHandler) userWithRetry(ctx context.Context, id string)
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
 		user := &iamv1alpha1.User{}
-		err := h.client.Get(ctx, client.ObjectKey{Name: id}, user)
+		err := c.Get(ctx, client.ObjectKey{Name: id}, user)
 		if err == nil {
 			return user, nil
 		}

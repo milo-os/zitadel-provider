@@ -42,3 +42,41 @@ func TestValidateWebhookConfig(t *testing.T) {
 		})
 	}
 }
+
+// The recovery endpoint mails a live registration code, so it carries the same mTLS
+// requirement as verification: an unauthenticated caller could otherwise have us mail
+// a working code of their choosing.
+func TestValidateWebhookConfig_RecoveryTemplateRequiresClientCA(t *testing.T) {
+	for name, tc := range map[string]struct {
+		recoveryTemplate string
+		clientCA         string
+		wantErr          bool
+	}{
+		"recovery on, no client CA":  {recoveryTemplate: "recovery-tpl", clientCA: "", wantErr: true},
+		"recovery on, client CA":     {recoveryTemplate: "recovery-tpl", clientCA: "ca.crt", wantErr: false},
+		"recovery off, no client CA": {recoveryTemplate: "", clientCA: "", wantErr: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.NewWebhookServerConfig()
+			// Verification stays off, so only the recovery template can trip the rule.
+			cfg.EmailVerificationTemplate = ""
+			cfg.AccountRecoveryTemplate = tc.recoveryTemplate
+			cfg.ClientCAFile = tc.clientCA
+
+			err := validateWebhookConfig(cfg)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected startup to fail: the recovery endpoint would serve unauthenticated callers")
+				}
+				if !strings.Contains(err.Error(), "--client-ca-file is required") {
+					t.Fatalf("error should name the missing flag, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}

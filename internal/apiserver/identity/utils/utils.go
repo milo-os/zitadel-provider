@@ -1,10 +1,17 @@
-// Package utils contains shared helpers for the identity REST handlers
-// (sessions, useridentities) that support staff users querying other users'
-// resources via a field selector. The default behavior of those handlers is
-// self-only (you can only see your own); when a field selector specifies a
-// different target user UID, the request is allowed iff the caller can
-// `get iam.miloapis.com/users/<targetUID>` on milo (verified via a
-// SubjectAccessReview against the milo apiserver).
+// Package utils contains the shared per-request authorization helpers for the
+// identity REST handlers — every point where a caller acts on a user other than
+// themselves. Two shapes use it:
+//
+//   - Cross-user reads (sessions, useridentities, passkeys). The handlers are
+//     self-only by default; when a field selector names a different target user
+//     UID, the request is allowed iff the caller can
+//     `get iam.miloapis.com/users/<targetUID>` on milo. See CanGetUser.
+//   - Support-triggered writes (passkeyregistrationlinks). The create is allowed
+//     iff the caller can `create identity.miloapis.com/passkeyregistrationlinks`
+//     on the target user, with the parent context that scopes the grant to that
+//     user rather than the whole cluster. See CanCreatePasskeyRegistrationLink.
+//
+// Both verify with a SubjectAccessReview against the milo apiserver.
 //
 // Authorization is intentionally delegated to milo rather than checked
 // in-process: this apiserver runs behind milo's front-proxy with an
@@ -75,6 +82,49 @@ func CanGetUser(ctx context.Context, sar SubjectAccessReviewer, caller user.Info
 				Group:    "iam.miloapis.com",
 				Resource: "users",
 				Name:     targetUID,
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return false, fmt.Errorf("subjectaccessreview against milo: %w", err)
+	}
+	return review.Status.Allowed, nil
+}
+
+// CanCreatePasskeyRegistrationLink asks milo whether `caller` may send a passkey
+// recovery link to `targetUserName`.
+//
+// Same delegation as CanGetUser: milo is the single Policy Decision Point, and its
+// OpenFGA authorizer resolves the identity-passkey-registration-links-editor role
+// through the parent context below. The parent extras are what make the grant
+// user-scoped rather than cluster-wide — the same convention the Project-scoped
+// resources use.
+func CanCreatePasskeyRegistrationLink(ctx context.Context, sar SubjectAccessReviewer, caller user.Info, targetUserName string) (bool, error) {
+	if sar == nil {
+		return false, fmt.Errorf("no SubjectAccessReviewer configured")
+	}
+	if caller == nil {
+		return false, fmt.Errorf("no caller info in context")
+	}
+
+	extra := toAuthzExtra(caller.GetExtra())
+	if extra == nil {
+		extra = map[string]authzv1.ExtraValue{}
+	}
+	extra["iam.miloapis.com/parent-type"] = authzv1.ExtraValue{"User"}
+	extra["iam.miloapis.com/parent-name"] = authzv1.ExtraValue{targetUserName}
+
+	review, err := sar.Create(ctx, &authzv1.SubjectAccessReview{
+		Spec: authzv1.SubjectAccessReviewSpec{
+			User:   caller.GetName(),
+			UID:    caller.GetUID(),
+			Groups: caller.GetGroups(),
+			Extra:  extra,
+			ResourceAttributes: &authzv1.ResourceAttributes{
+				Verb:     "create",
+				Group:    "identity.miloapis.com",
+				Resource: "passkeyregistrationlinks",
+				Name:     targetUserName,
 			},
 		},
 	}, metav1.CreateOptions{})
