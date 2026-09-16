@@ -41,6 +41,10 @@ type AccountRecoveryConfig struct {
 	// which is the safe direction: a missing config must not become "allow any host".
 	AllowedOrigins []string
 	ExpiryMinutes  int
+	// AllowedClientNames pins WHICH mTLS caller may reach this endpoint, by leaf
+	// certificate CN or URI SAN. Empty allows any caller the client CA signed, which
+	// is the default and is why runWebhookServer warns about it at startup.
+	AllowedClientNames []string
 	// UserLookupAttempts and UserLookupBaseWait bound the retry in userWithRetry,
 	// which absorbs the race against create-user-account.
 	UserLookupAttempts int
@@ -102,6 +106,18 @@ func (h *AccountRecoveryHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// mTLS proves only that the caller holds a certificate this CA signed, never which
+	// holder it is, so the identity check happens here. Logged either way: without it
+	// an incident review can establish only that someone with a CA-signed certificate
+	// asked for a code.
+	caller := callerIdentity(r)
+	if !callerAllowed(r, h.cfg.AllowedClientNames) {
+		log.Info("Rejected a client certificate that is not on the allowlist", "caller", caller)
+		http.Error(w, "client certificate is not allowed", http.StatusForbidden)
+		return
+	}
+	log.Info("Handling mail request", "caller", caller)
 
 	var req accountRecoveryRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(&req); err != nil {

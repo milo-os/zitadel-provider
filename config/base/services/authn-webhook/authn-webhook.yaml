@@ -39,6 +39,7 @@ spec:
             - --jwt-expiration=$(JWT_EXPIRATION)
             - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
             - --client-ca-file=$(CLIENT_CA_FILE)
+            - --mail-webhook-allowed-client-names=$(MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES)
             - --email-verification-template=$(EMAIL_VERIFICATION_TEMPLATE)
             - --email-verification-allowed-origins=$(EMAIL_VERIFICATION_ALLOWED_ORIGINS)
             - --email-verification-expiry-minutes=$(EMAIL_VERIFICATION_EXPIRY_MINUTES)
@@ -73,6 +74,13 @@ spec:
             # Must stay empty: any value turns on client-cert verification for the
             # whole webhook server, and nothing is mounted here to satisfy it.
             - name: CLIENT_CA_FILE
+              value: ""
+            # Which mTLS callers may reach the mail endpoints, by client certificate
+            # CN and/or URI SAN. CLIENT_CA_FILE proves only that a caller holds a
+            # cert this CA signed; where one CA issues to many workloads that is all
+            # of them. Empty accepts any signed caller and logs a startup warning —
+            # production sets this.
+            - name: MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES
               value: ""
             - name: EMAIL_VERIFICATION_EXPIRY_MINUTES
               value: "60"

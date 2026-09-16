@@ -33,18 +33,20 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func newHandler(t *testing.T, objs ...client.Object) (*EmailVerificationHandler, client.Client) {
-	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
-	h := NewEmailVerificationHandler(c, EmailVerificationConfig{
+func verificationConfig() EmailVerificationConfig {
+	return EmailVerificationConfig{
 		TemplateName:          "verify-tpl",
 		NotificationNamespace: "default",
 		AllowedOrigins:        []string{"https://auth.example.test", "http://localhost:3000"},
 		ExpiryMinutes:         60,
 		UserLookupAttempts:    5,
 		UserLookupBaseWait:    200 * time.Millisecond,
-	})
-	return h, c
+	}
+}
+
+func newHandler(t *testing.T, objs ...client.Object) (*EmailVerificationHandler, client.Client) {
+	t.Helper()
+	return newHandlerWith(t, verificationConfig(), interceptor.Funcs{}, objs...)
 }
 
 func testUser() *iamv1alpha1.User {

@@ -57,6 +57,13 @@ type WebhookServerConfig struct {
 	AccountRecoveryCooldown   time.Duration
 	AccountRecoveryMaxPerHour int
 
+	// MailWebhookAllowedClientNames pins WHICH mTLS caller may reach the mail
+	// endpoints, by leaf certificate CN or URI SAN. ClientCAFile proves only that the
+	// caller holds a certificate this CA signed — in a cluster where one CA issues to
+	// many workloads, that is every one of them. Empty allows any signed caller and
+	// draws a startup warning; production sets it.
+	MailWebhookAllowedClientNames []string
+
 	// ClientCAFile enables mTLS. Without it the endpoint would accept any caller that
 	// can reach the Service, so runWebhookServer refuses to start when either mail
 	// template is set and this is not.
