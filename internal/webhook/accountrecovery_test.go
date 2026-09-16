@@ -540,3 +540,49 @@ func TestAccountRecovery_CooldownLookupFailureFailsClosed(t *testing.T) {
 		t.Fatalf("expected no mint, got %d calls", len(minter.calls))
 	}
 }
+
+// Jose #4. url.Parse splits userinfo out of the host, so a scheme+host comparison
+// admitted "https://evil.com@auth.example.test". The dangerous direction — a URL
+// that looks like the trusted host but resolves to the attacker — was already
+// rejected; what passed was the inverse, which renders as evil.com in the visible
+// link and which mail clients, link scanners and preview services do not all parse
+// the way Go does. There is no legitimate userinfo in a returnTo.
+func TestAccountRecovery_RejectsReturnToWithUserinfo(t *testing.T) {
+	tests := map[string]string{
+		"attacker as userinfo, allowed host": "https://evil.com@auth.example.test/recover/complete",
+		"allowed host as userinfo, attacker": "https://auth.example.test@evil.com/recover/complete",
+		"userinfo with a password":           "https://evil.com:pw@auth.example.test/recover/complete",
+	}
+	for name, returnTo := range tests {
+		t.Run(name, func(t *testing.T) {
+			h, c, minter := newRecoveryHandlerWith(t, recoveryConfig(), interceptor.Funcs{}, verifiedUser())
+
+			body := `{"userId":"user-1","returnTo":"` + returnTo + `","requestedBy":"self"}`
+			if rec := postRecovery(t, h, body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %q, got %d", returnTo, rec.Code)
+			}
+			if n := len(emails(t, c)); n != 0 {
+				t.Fatalf("expected no Email, got %d", n)
+			}
+			if len(minter.calls) != 0 {
+				t.Fatalf("expected no mint, got %d calls", len(minter.calls))
+			}
+		})
+	}
+}
+
+// Belt and braces for the same finding: even if the rejection above were ever
+// loosened, attacker-supplied userinfo must never be carried into the mailed link.
+func TestAccountRecovery_UserinfoNeverReachesActionURL(t *testing.T) {
+	h, c, _ := newRecoveryHandlerWith(t, recoveryConfig(), interceptor.Funcs{}, verifiedUser())
+
+	body := `{"userId":"user-1","returnTo":"https://evil.com@auth.example.test/recover/complete",` +
+		`"requestedBy":"self"}`
+	postRecovery(t, h, body)
+
+	for _, e := range emails(t, c) {
+		if strings.Contains(varsOf(e)["ActionUrl"], "evil.com") {
+			t.Fatalf("ActionUrl carried attacker userinfo: %q", varsOf(e)["ActionUrl"])
+		}
+	}
+}

@@ -130,8 +130,7 @@ func (h *AccountRecoveryHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	// Parsed once here and reused for the action URL, so the value the allowlist
 	// approved is the value we build the link from.
 	returnTo, err := url.Parse(req.ReturnTo)
-	if err != nil || returnTo.Scheme == "" || returnTo.Host == "" ||
-		!originAllowed(returnTo, h.cfg.AllowedOrigins) {
+	if err != nil || !returnToUsable(returnTo) || !originAllowed(returnTo, h.cfg.AllowedOrigins) {
 		// Deliberately does not echo the value: this is the phishing guard, and the
 		// rejected origin is attacker-controlled input.
 		log.Info("Rejected returnTo outside the allowlist", "userId", req.UserID)
