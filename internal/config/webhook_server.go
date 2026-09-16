@@ -37,11 +37,12 @@ type WebhookServerConfig struct {
 	// AccountRecoveryTemplate is the EmailTemplate resource used for self-serve
 	// account-recovery mail. Empty disables the endpoint entirely — the route is not
 	// registered, so an unconfigured deployment cannot send.
+	//
+	// There is deliberately no support template here. Support-branded mail is the
+	// apiserver's PasskeyRegistrationLink create, which authorizes the request and
+	// records who asked and why; this endpoint can do neither, so it must not be able
+	// to produce that copy.
 	AccountRecoveryTemplate string
-	// AccountRecoverySupportTemplate is the template whose copy says Datum Support
-	// sent the link. The request selects between the two names; it can never supply
-	// one, so a compromised caller cannot pick an arbitrary template.
-	AccountRecoverySupportTemplate string
 	// AccountRecoveryAllowedOrigins is the returnTo allowlist for recovery links.
 	// Empty rejects every request: a missing value must never read as "allow any host".
 	AccountRecoveryAllowedOrigins []string

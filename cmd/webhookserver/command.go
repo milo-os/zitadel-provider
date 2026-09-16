@@ -20,6 +20,7 @@ import (
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	webhook "go.miloapis.com/auth-provider-zitadel/internal/webhook"
 	token "go.miloapis.com/auth-provider-zitadel/pkg/token"
+	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
 
 // NewAuthenticationWebhookServerCommand returns a cobra command that starts the UserDeactivation
@@ -68,8 +69,6 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	// create Emails in the same place.
 	cmd.Flags().StringVar(&cfg.AccountRecoveryTemplate, "account-recovery-template", cfg.AccountRecoveryTemplate,
 		"EmailTemplate resource for self-serve account recovery mail; empty disables the endpoint")
-	cmd.Flags().StringVar(&cfg.AccountRecoverySupportTemplate, "account-recovery-support-template", cfg.AccountRecoverySupportTemplate,
-		"EmailTemplate resource for support-triggered account recovery mail")
 	cmd.Flags().StringSliceVar(&cfg.AccountRecoveryAllowedOrigins, "account-recovery-allowed-origins", nil,
 		"Allowlisted origins for returnTo, e.g. https://auth.example.net,http://localhost:3000")
 	cmd.Flags().IntVar(&cfg.AccountRecoveryExpiryMinutes, "account-recovery-expiry-minutes", cfg.AccountRecoveryExpiryMinutes,
@@ -202,9 +201,20 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 	}
 
 	if cfg.AccountRecoveryTemplate != "" {
-		recovery := webhook.NewAccountRecoveryHandler(directClient, webhook.AccountRecoveryConfig{
+		// The recovery endpoint mints the code itself rather than relaying one the
+		// caller supplied, so it needs a Zitadel client. Same machine-account key the
+		// introspector above already uses; NewSDK strips the scheme off Domain.
+		zc, err := zitadel.NewSDK(cmd.Context(), zitadel.SDKConfig{
+			Domain:  cfg.ZitadelDomain,
+			Issuer:  cfg.ZitadelDomain,
+			KeyPath: cfg.ZitadelPrivateKey,
+		})
+		if err != nil {
+			return fmt.Errorf("init zitadel sdk for account recovery: %w", err)
+		}
+
+		recovery := webhook.NewAccountRecoveryHandler(directClient, zc, webhook.AccountRecoveryConfig{
 			TemplateName:          cfg.AccountRecoveryTemplate,
-			SupportTemplateName:   cfg.AccountRecoverySupportTemplate,
 			NotificationNamespace: cfg.NotificationNamespace,
 			AllowedOrigins:        cfg.AccountRecoveryAllowedOrigins,
 			ExpiryMinutes:         cfg.AccountRecoveryExpiryMinutes,

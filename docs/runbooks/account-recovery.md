@@ -8,7 +8,7 @@ Two triggers produce the same mail from the same builder:
 
 | Trigger | Surface | Switch |
 |---|---|---|
-| Self-serve (`/recover` in auth-ui) | `POST /v1/email/recovery` on the authn-webhook | `--account-recovery-template` (empty = route not registered) |
+| Self-serve (`/recover` in auth-ui) | `POST /v1/email/recovery` on the authn-webhook — `requestedBy` accepts **only** `"self"` | `--account-recovery-template` (empty = route not registered) |
 | Support (staff-portal) | `create identity.miloapis.com/v1alpha1 PasskeyRegistrationLink` on the apiserver | `--recovery-links-enabled` (false = create returns 503) |
 
 See also [components/passkey-authentication.md](../components/passkey-authentication.md)
@@ -40,7 +40,6 @@ flag as `--flag=$(ENV)`. The env names below are what an overlay patches.
 | Flag | Env | Default | Notes |
 |---|---|---|---|
 | `--account-recovery-template` | `ACCOUNT_RECOVERY_TEMPLATE` | `""` | Empty leaves the route unregistered. Setting it makes `--client-ca-file` mandatory. |
-| `--account-recovery-support-template` | `ACCOUNT_RECOVERY_SUPPORT_TEMPLATE` | `""` | The "Datum Support sent this" copy. |
 | `--account-recovery-allowed-origins` | `ACCOUNT_RECOVERY_ALLOWED_ORIGINS` | `""` | returnTo allowlist. **Empty rejects everything** — a missing value must never read as "allow any host". |
 | `--account-recovery-expiry-minutes` | `ACCOUNT_RECOVERY_EXPIRY_MINUTES` | `60` | A copy of Zitadel's `PasswordlessInitCode` lifetime. If that changes and this does not, the mail starts lying. |
 
