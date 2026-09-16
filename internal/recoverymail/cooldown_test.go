@@ -118,7 +118,7 @@ func TestTooSoon_HourlyCap(t *testing.T) {
 
 // The window slides: yesterday's mail does not spend today's budget.
 func TestTooSoon_IgnoresMailOlderThanAnHour(t *testing.T) {
-	var objs []client.Object
+	objs := make([]client.Object, 0, 9)
 	for i := range 9 {
 		objs = append(objs, sentAgo(fmt.Sprintf("old%d", i), testUserID, RequestedBySelf,
 			time.Duration(90+i)*time.Minute))
@@ -141,7 +141,7 @@ func TestTooSoon_ScopedToTheUser(t *testing.T) {
 // A self-serve flood must not deny support the backstop that exists precisely for
 // when self-serve has failed the user. Each trigger gets its own per-user budget.
 func TestTooSoon_ScopedToTheTrigger(t *testing.T) {
-	var objs []client.Object
+	objs := make([]client.Object, 0, 9)
 	for i := range 9 {
 		objs = append(objs, sentAgo(fmt.Sprintf("self%d", i), testUserID, RequestedBySelf,
 			time.Duration(i)*time.Second))
@@ -160,7 +160,7 @@ func TestTooSoon_ScopedToTheTrigger(t *testing.T) {
 // spelled out here because 0 reading as "allow nothing" would be the other obvious
 // interpretation, and the flags' help text has to agree with this one.
 func TestTooSoon_ZeroDisablesEachCheck(t *testing.T) {
-	var objs []client.Object
+	objs := make([]client.Object, 0, 9)
 	for i := range 9 {
 		objs = append(objs, sentAgo(fmt.Sprintf("a%d", i), testUserID, RequestedBySelf,
 			time.Duration(i)*time.Second))
