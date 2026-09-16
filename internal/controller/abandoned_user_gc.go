@@ -40,6 +40,14 @@ var (
 		Help: "Accounts past the retention window that were spared because they carry an external IdP link.",
 	})
 
+	// verifiedNoCredential measures the class recovery exists for: a proven address
+	// with nothing that can sign in. Counted, never collected — deleting a verified
+	// account would race the recovery mail that turns it back into a working one
+	// (spec §6). Revisit trigger: 50.
+	verifiedNoCredential = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "zitadel_provider_verified_no_credential_accounts",
+		Help: "Verified accounts with no passkey, password or IdP link — reachable only through recovery (Phase C, C9). Counted, never collected.",
+	})
 	abandonedErrors = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "zitadel_provider_abandoned_gc_errors_total",
 		Help: "Errors encountered while collecting abandoned accounts.",
@@ -47,7 +55,8 @@ var (
 )
 
 func init() {
-	metrics.Registry.MustRegister(abandonedScanned, abandonedEligible, abandonedDeleted, abandonedSkippedIDP, abandonedErrors)
+	metrics.Registry.MustRegister(abandonedScanned, abandonedEligible, abandonedDeleted, abandonedSkippedIDP, abandonedErrors,
+		verifiedNoCredential)
 }
 
 // ZitadelUserReaper is the narrow surface the sweep needs.
@@ -55,6 +64,28 @@ type ZitadelUserReaper interface {
 	ListHumanUsers(ctx context.Context, offset uint64, limit uint32) ([]zitadel.User, int, error)
 	ListIDPLinks(ctx context.Context, userID string) ([]zitadel.IDPLink, error)
 	DeleteUser(ctx context.Context, userID string) error
+	// ListAuthMethodTypes backs the C9 gauge; the sweep never acts on its result.
+	ListAuthMethodTypes(ctx context.Context, userID string) ([]string, error)
+}
+
+// usableCredentials are the Zitadel AuthenticationMethodType names that can actually
+// start a session. otpEmail is deliberately absent: it is enrolled on every Phase B
+// account and C2 settled that it is not a login method, so counting it would hide
+// exactly the class this gauge exists to measure.
+var usableCredentials = map[string]struct{}{
+	"AUTHENTICATION_METHOD_TYPE_PASSWORD": {},
+	"AUTHENTICATION_METHOD_TYPE_PASSKEY":  {},
+	"AUTHENTICATION_METHOD_TYPE_IDP":      {},
+}
+
+// hasUsableCredential reports whether any of the user's enrolled methods can sign in.
+func hasUsableCredential(methods []string) bool {
+	for _, m := range methods {
+		if _, ok := usableCredentials[m]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=users,verbs=get;list;watch;delete
@@ -130,7 +161,7 @@ func (g *AbandonedUserGC) sweepOnce(ctx context.Context) error {
 	cutoff := g.clock().Add(-g.Retention)
 
 	var offset uint64
-	var eligible, deleted int
+	var eligible, deleted, noCredential int
 
 	for {
 		users, raw, err := g.Zitadel.ListHumanUsers(ctx, offset, sweepPageSize)
@@ -141,6 +172,21 @@ func (g *AbandonedUserGC) sweepOnce(ctx context.Context) error {
 
 		for _, u := range users {
 			abandonedScanned.Inc()
+
+			// C9 visibility, not a collection decision: measure the verified accounts
+			// that cannot sign in. One RPC per VERIFIED user per GC interval (6h) —
+			// unverified users are the sweep's own business and cost nothing here.
+			if u.IsEmailVerified {
+				methods, err := g.Zitadel.ListAuthMethodTypes(ctx, u.ID)
+				if err != nil {
+					// An unreadable method list is not evidence that there are none.
+					abandonedErrors.Inc()
+					log.Error(err, "Skipping C9 gauge for account: could not read auth methods", "userID", u.ID)
+				} else if !hasUsableCredential(methods) {
+					noCredential++
+				}
+			}
+
 			if !g.isAbandoned(u, cutoff) {
 				continue
 			}
@@ -197,8 +243,13 @@ func (g *AbandonedUserGC) sweepOnce(ctx context.Context) error {
 		offset += uint64(raw)
 	}
 
+	// Set after the page loop so the gauge always reflects a whole sweep rather than
+	// a partial one.
+	verifiedNoCredential.Set(float64(noCredential))
+
 	log.Info("Abandoned-account sweep complete",
-		"eligible", eligible, "deleted", deleted, "dryRun", g.DryRun)
+		"eligible", eligible, "deleted", deleted, "dryRun", g.DryRun,
+		"verifiedNoCredential", noCredential)
 	return nil
 }
 

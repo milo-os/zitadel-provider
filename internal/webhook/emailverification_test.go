@@ -33,18 +33,20 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func newHandler(t *testing.T, objs ...client.Object) (*EmailVerificationHandler, client.Client) {
-	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
-	h := NewEmailVerificationHandler(c, EmailVerificationConfig{
+func verificationConfig() EmailVerificationConfig {
+	return EmailVerificationConfig{
 		TemplateName:          "verify-tpl",
 		NotificationNamespace: "default",
 		AllowedOrigins:        []string{"https://auth.example.test", "http://localhost:3000"},
 		ExpiryMinutes:         60,
 		UserLookupAttempts:    5,
 		UserLookupBaseWait:    200 * time.Millisecond,
-	})
-	return h, c
+	}
+}
+
+func newHandler(t *testing.T, objs ...client.Object) (*EmailVerificationHandler, client.Client) {
+	t.Helper()
+	return newHandlerWith(t, verificationConfig(), interceptor.Funcs{}, objs...)
 }
 
 func testUser() *iamv1alpha1.User {
@@ -405,5 +407,27 @@ func TestEmailVerification_MethodNotAllowedAdvertisesPost(t *testing.T) {
 
 	if got := rec.Header().Get("Allow"); got != http.MethodPost {
 		t.Fatalf("Allow = %q, want POST", got)
+	}
+}
+
+// Jose #4 lands on originAllowed, which both mail endpoints share, so the guard is
+// pinned on this one too. A fix to one copy that left the other exploitable is
+// exactly what sharing the function is meant to prevent.
+func TestEmailVerification_RejectsReturnToWithUserinfo(t *testing.T) {
+	for name, returnTo := range map[string]string{
+		"attacker as userinfo, allowed host": "https://evil.com@auth.example.test/verify",
+		"allowed host as userinfo, attacker": "https://auth.example.test@evil.com/verify",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, c := newHandler(t, testUser())
+
+			body := `{"userId":"user-1","code":"ABC123","returnTo":"` + returnTo + `"}`
+			if rec := post(t, h, body); rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %q, got %d", returnTo, rec.Code)
+			}
+			if n := len(emails(t, c)); n != 0 {
+				t.Fatalf("expected no Email, got %d", n)
+			}
+		})
 	}
 }
