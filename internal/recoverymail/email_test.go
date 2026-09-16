@@ -24,7 +24,7 @@ func testUser() *iamv1alpha1.User {
 func selfInput() Input {
 	return Input{
 		User: testUser(), UserID: "user-1", CodeID: "code-id-1", Code: testCode,
-		ActionURL:    "https://auth.example.test/recover/complete?code=" + testCode,
+		ActionURL:    "https://auth.example.test/recover/complete#code=" + testCode,
 		TemplateName: "recovery-tpl", Namespace: "default", ExpiryMinutes: 60,
 		RequestedBy: RequestedBySelf,
 	}
@@ -115,7 +115,7 @@ func TestBuild_VariablesAndRecipient(t *testing.T) {
 	want := map[string]string{
 		"UserName":      "Alice Doe",
 		"Code":          testCode,
-		"ActionUrl":     "https://auth.example.test/recover/complete?code=" + testCode,
+		"ActionUrl":     "https://auth.example.test/recover/complete#code=" + testCode,
 		"ExpiryMinutes": "60",
 	}
 	if len(vars) != len(want) {
@@ -162,7 +162,9 @@ func TestBuild_ExpiryFallsBackTo60(t *testing.T) {
 	}
 }
 
-func TestActionURL_SetsTheThreeParams(t *testing.T) {
+// The identifiers stay in the query: they are not credentials, and the landing page
+// needs them server-side. The code does not.
+func TestActionURL_IdentifiersStayInTheQuery(t *testing.T) {
 	base, err := url.Parse("https://auth.example.test/recover/complete?next=passkey")
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +177,7 @@ func TestActionURL_SetsTheThreeParams(t *testing.T) {
 
 	q := got.Query()
 	for k, want := range map[string]string{
-		"userId": "user-1", "codeId": "code-id-1", "code": testCode, "next": "passkey",
+		"userId": "user-1", "codeId": "code-id-1", "next": "passkey",
 	} {
 		if q.Get(k) != want {
 			t.Errorf("query %s = %q, want %q", k, q.Get(k), want)
@@ -183,5 +185,84 @@ func TestActionURL_SetsTheThreeParams(t *testing.T) {
 	}
 	if got.Host != base.Host || got.Path != base.Path {
 		t.Errorf("ActionURL changed the destination: %q", got.String())
+	}
+}
+
+// Jose #5. The code is a bearer credential with no revocation API, so a copy in the
+// landing host's access logs, its ingress/CDN, its APM or the user's history is a
+// working passkey-enrollment credential for the whole expiry window. A fragment is
+// never sent to a server and never appears in a Referer, which collapses that
+// exposure to the browser that was handed the link.
+func TestActionURL_CodeTravelsInTheFragment(t *testing.T) {
+	base, err := url.Parse("https://auth.example.test/recover/complete?next=passkey")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw := ActionURL(base, "user-1", "code-id-1", testCode)
+	got, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("ActionURL produced an unparseable URL: %v", err)
+	}
+
+	if _, present := got.Query()["code"]; present {
+		t.Errorf("the query still carries a code key: %q", got.RawQuery)
+	}
+	if strings.Contains(got.RawQuery, testCode) {
+		t.Errorf("the query still carries the code: %q", got.RawQuery)
+	}
+	if want := "code=" + testCode; got.Fragment != want {
+		t.Errorf("fragment = %q, want %q", got.Fragment, want)
+	}
+}
+
+// The fragment is form-urlencoded, so the landing page can read it with
+// URLSearchParams and get the code back byte for byte.
+func TestActionURL_FragmentIsEscaped(t *testing.T) {
+	base, err := url.Parse("https://auth.example.test/recover/complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const awkward = "a b&c=d+e#f"
+
+	raw := ActionURL(base, "user-1", "code-id-1", awkward)
+
+	_, fragment, found := strings.Cut(raw, "#")
+	if !found {
+		t.Fatalf("no fragment in %q", raw)
+	}
+	if strings.ContainsAny(fragment, " #") {
+		t.Errorf("fragment %q is not escaped", fragment)
+	}
+	values, err := url.ParseQuery(fragment)
+	if err != nil {
+		t.Fatalf("fragment is not form-urlencoded: %v", err)
+	}
+	if got := values.Get("code"); got != awkward {
+		t.Errorf("decoded code = %q, want %q", got, awkward)
+	}
+}
+
+// The runbook's containment claim is only true if this holds, so it is asserted on
+// the Email itself and not just on the helper.
+func TestBuild_ActionURLQueryNeverCarriesTheCode(t *testing.T) {
+	base, err := url.Parse("https://auth.example.test/recover/complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := selfInput()
+	in.ActionURL = ActionURL(base, in.UserID, in.CodeID, in.Code)
+
+	actionURL := variables(Build(in))["ActionUrl"]
+
+	got, err := url.Parse(actionURL)
+	if err != nil {
+		t.Fatalf("ActionUrl unparseable: %v", err)
+	}
+	if strings.Contains(got.RawQuery, testCode) {
+		t.Fatalf("the Email's ActionUrl query carries the code: %q", got.RawQuery)
+	}
+	if !strings.Contains(got.Fragment, testCode) {
+		t.Fatalf("the Email's ActionUrl fragment lost the code: %q", got.Fragment)
 	}
 }
