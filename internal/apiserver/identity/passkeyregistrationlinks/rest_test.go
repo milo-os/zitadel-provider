@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	"go.miloapis.com/auth-provider-zitadel/internal/recoverymail"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
@@ -515,5 +518,78 @@ func TestCreate_CooldownLookupFailureFailsClosed(t *testing.T) {
 	}
 	if h.z.calls != 0 {
 		t.Fatalf("expected no mint, got %d calls", h.z.calls)
+	}
+}
+
+// newOpts is a configuration that New must accept, for the tests that break exactly
+// one field at a time.
+func newOpts() Options {
+	return Options{
+		Enabled:               true,
+		SupportTemplateName:   "recovery-support-tpl",
+		NotificationNamespace: "default",
+		CompleteURL:           "https://auth.example.test/recover/complete",
+		ExpiryMinutes:         60,
+	}
+}
+
+// S2. Enabled with no template would have minted a live, unrevocable code and then
+// built an Email with an empty templateRef — a credential spent on a mail that cannot
+// render. Symmetric with the --client-ca-file guard: refuse to start.
+func TestNew_RejectsEnabledWithoutSupportTemplate(t *testing.T) {
+	opts := newOpts()
+	opts.SupportTemplateName = ""
+
+	if _, err := New(opts); err == nil {
+		t.Fatal("expected New to reject --recovery-links-enabled without a support template")
+	}
+}
+
+// S3. url.Parse("") and url.Parse("/relative") both succeed, so the existing parse
+// check passed values that cannot become a mailed link. Same rule the webhook applies
+// to returnTo.
+func TestNew_RejectsUnusableCompleteURL(t *testing.T) {
+	for name, completeURL := range map[string]string{
+		"empty":        "",
+		"relative":     "/recover/complete",
+		"no scheme":    "auth.example.test/recover/complete",
+		"has userinfo": "https://evil.com@auth.example.test/recover/complete",
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := newOpts()
+			opts.CompleteURL = completeURL
+
+			if _, err := New(opts); err == nil {
+				t.Fatalf("expected New to reject --account-recovery-complete-url %q", completeURL)
+			}
+		})
+	}
+}
+
+// The shipped default is an empty complete URL and an empty template, with the
+// feature off. That has to keep booting, or every deployment breaks on upgrade.
+func TestNew_DisabledToleratesTheShippedDefaults(t *testing.T) {
+	if _, err := New(Options{Enabled: false, NotificationNamespace: "default"}); err != nil {
+		t.Fatalf("the dormant default configuration must start: %v", err)
+	}
+}
+
+// S5. st.Message() is Zitadel's text about Zitadel's internals, reaching an API
+// client that asked this apiserver a question. It goes to the log instead.
+func TestTranslateErr_InvalidArgumentDoesNotEchoZitadel(t *testing.T) {
+	const zitadelDetail = "user 12345: passwordless init code XYZ already exists in org 999"
+
+	err := translateErr(status.Error(codes.InvalidArgument, zitadelDetail), "user-1")
+
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest, got %v", err)
+	}
+	if strings.Contains(err.Error(), zitadelDetail) {
+		t.Fatalf("the returned error echoed Zitadel's message: %q", err.Error())
+	}
+	for _, leak := range []string{"12345", "XYZ", "999"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the returned error leaked %q: %q", leak, err.Error())
+		}
 	}
 }

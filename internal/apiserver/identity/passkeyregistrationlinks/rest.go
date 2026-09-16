@@ -83,10 +83,31 @@ type REST struct {
 }
 
 // New validates the options and builds the storage.
+//
+// The guards apply only while Enabled: the shipped default is the feature off with an
+// empty template and an empty complete URL, and that has to keep booting. Once it is
+// on, a misconfiguration must fail at startup rather than on a support engineer's
+// first request — by which point a live, unrevocable code has already been minted.
 func New(opts Options) (*REST, error) {
 	completeURL, err := url.Parse(opts.CompleteURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse --account-recovery-complete-url: %w", err)
+	}
+	if opts.Enabled {
+		if opts.SupportTemplateName == "" {
+			// Otherwise the create mints a code and then builds an Email with an empty
+			// templateRef: the credential is spent on a mail that cannot render.
+			return nil, fmt.Errorf(
+				"--account-recovery-support-template is required when --recovery-links-enabled is set")
+		}
+		// url.Parse("") and url.Parse("/relative") both succeed, so parsing alone
+		// admits values that cannot become a mailed link. Same rule the webhook
+		// applies to returnTo, including the userinfo case.
+		if completeURL.Scheme == "" || completeURL.Host == "" || completeURL.User != nil {
+			return nil, fmt.Errorf(
+				"--account-recovery-complete-url must be an absolute URL with no userinfo, e.g. "+
+					"https://auth.example.net/recover/complete (got %q)", opts.CompleteURL)
+		}
 	}
 	return &REST{
 		Z: opts.Z, Milo: opts.Milo, MiloSAR: opts.MiloSAR, Enabled: opts.Enabled,
@@ -230,7 +251,11 @@ func translateErr(err error, name string) error {
 		case codes.Unauthenticated:
 			return apierrors.NewUnauthorized("unauthenticated")
 		case codes.InvalidArgument:
-			return apierrors.NewBadRequest(st.Message())
+			// Not st.Message(): that is Zitadel's text about Zitadel's internals, and
+			// this error reaches a client who asked THIS apiserver a question. It can
+			// name users, orgs and code state the caller was never entitled to.
+			klog.ErrorS(err, "Zitadel rejected the registration link request", "userID", name)
+			return apierrors.NewBadRequest("invalid request to the auth provider")
 		case codes.DeadlineExceeded, codes.Unavailable:
 			return apierrors.NewServiceUnavailable("zitadel unavailable")
 		default:
