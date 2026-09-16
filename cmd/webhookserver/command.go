@@ -73,6 +73,10 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 		"Allowlisted origins for returnTo, e.g. https://auth.example.net,http://localhost:3000")
 	cmd.Flags().IntVar(&cfg.AccountRecoveryExpiryMinutes, "account-recovery-expiry-minutes", cfg.AccountRecoveryExpiryMinutes,
 		"Recovery code lifetime shown to users; must match Zitadel's PasswordlessInitCode lifetime")
+	cmd.Flags().DurationVar(&cfg.AccountRecoveryCooldown, "account-recovery-cooldown", cfg.AccountRecoveryCooldown,
+		"Minimum gap between recovery mails for one user; 0 disables the cooldown")
+	cmd.Flags().IntVar(&cfg.AccountRecoveryMaxPerHour, "account-recovery-max-per-hour", cfg.AccountRecoveryMaxPerHour,
+		"Maximum recovery mails per user per hour; 0 disables the cap")
 
 	cmd.Flags().StringVar(&cfg.ClientCAFile, "client-ca-file", cfg.ClientCAFile,
 		"Filename in the directory that contains the CA bundle used to verify client certificates (mTLS)")
@@ -218,6 +222,8 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 			NotificationNamespace: cfg.NotificationNamespace,
 			AllowedOrigins:        cfg.AccountRecoveryAllowedOrigins,
 			ExpiryMinutes:         cfg.AccountRecoveryExpiryMinutes,
+			Cooldown:              cfg.AccountRecoveryCooldown,
+			MaxPerHour:            cfg.AccountRecoveryMaxPerHour,
 			// Shared with verification: both race the same provisioning path.
 			UserLookupAttempts: cfg.EmailVerificationUserLookupAttempts,
 			UserLookupBaseWait: cfg.EmailVerificationUserLookupBaseWait,

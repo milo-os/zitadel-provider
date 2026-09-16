@@ -97,6 +97,16 @@ type harness struct {
 
 func newREST(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *harness {
 	t.Helper()
+	return newRESTWith(t, func(*Options) {}, funcs, objs...)
+}
+
+func newRESTWith(
+	t *testing.T,
+	tune func(*Options),
+	funcs interceptor.Funcs,
+	objs ...client.Object,
+) *harness {
+	t.Helper()
 	z := &fakeZitadelAPI{}
 	sar := &fakeSAR{allowed: true}
 	milo := fake.NewClientBuilder().
@@ -105,17 +115,36 @@ func newREST(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *harn
 		WithInterceptorFuncs(funcs).
 		Build()
 
-	r, err := New(Options{
+	opts := Options{
 		Z: z, Milo: milo, MiloSAR: sar, Enabled: true,
 		SupportTemplateName:   "recovery-support-tpl",
 		NotificationNamespace: "default",
 		CompleteURL:           "https://auth.example.test/recover/complete",
 		ExpiryMinutes:         60,
-	})
+	}
+	tune(&opts)
+
+	r, err := New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return &harness{rest: r, z: z, sar: sar, milo: milo}
+}
+
+// sentSupportMail is a support recovery mail this user already got, labelled as
+// recoverymail labels the real thing.
+func sentSupportMail(name string, ago time.Duration) *notificationv1alpha1.Email {
+	return &notificationv1alpha1.Email{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-ago)),
+			Labels: map[string]string{
+				recoverymail.LabelUser:        "user-1",
+				recoverymail.LabelRequestedBy: recoverymail.RequestedBySupport,
+			},
+		},
+	}
 }
 
 func callerCtx() context.Context {
@@ -432,4 +461,59 @@ func TestRESTInterface(t *testing.T) {
 		t.Errorf("GetSingularName() = %q", got)
 	}
 	h.rest.Destroy()
+}
+
+// The same per-user budget the self-serve webhook enforces. Support is SAR-gated, so
+// here the cap is a sanity bound — a stuck staff-portal retry loop, not an attacker.
+func TestCreate_CooldownIsTooManyRequests(t *testing.T) {
+	h := newRESTWith(t, func(o *Options) {
+		o.Cooldown = 2 * time.Minute
+		o.MaxPerHour = 5
+	}, interceptor.Funcs{}, verifiedUser(), sentSupportMail("recent", 30*time.Second))
+
+	_, err := create(t, h, link())
+
+	if !apierrors.IsTooManyRequests(err) {
+		t.Fatalf("expected TooManyRequests, got %v", err)
+	}
+	if h.z.calls != 0 {
+		t.Fatalf("a throttled create must not mint a code, got %d calls", h.z.calls)
+	}
+	if n := len(emails(t, h.milo)); n != 1 {
+		t.Fatalf("expected only the pre-existing Email, got %d", n)
+	}
+}
+
+func TestCreate_PastTheCooldownIsAllowed(t *testing.T) {
+	h := newRESTWith(t, func(o *Options) {
+		o.Cooldown = 2 * time.Minute
+		o.MaxPerHour = 5
+	}, interceptor.Funcs{}, verifiedUser(), sentSupportMail("old", 10*time.Minute))
+
+	if _, err := create(t, h, link()); err != nil {
+		t.Fatalf("expected success past the cooldown, got %v", err)
+	}
+	if h.z.calls != 1 {
+		t.Fatalf("expected one mint, got %d", h.z.calls)
+	}
+}
+
+// An unreadable list is not evidence that nothing was sent.
+func TestCreate_CooldownLookupFailureFailsClosed(t *testing.T) {
+	h := newRESTWith(t, func(o *Options) {
+		o.Cooldown = 2 * time.Minute
+	}, interceptor.Funcs{
+		List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+			return errors.New("apiserver unavailable")
+		},
+	}, verifiedUser())
+
+	_, err := create(t, h, link())
+
+	if err == nil {
+		t.Fatal("expected an error when the budget cannot be evaluated")
+	}
+	if h.z.calls != 0 {
+		t.Fatalf("expected no mint, got %d calls", h.z.calls)
+	}
 }

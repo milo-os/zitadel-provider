@@ -16,7 +16,9 @@ import (
 	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	"go.miloapis.com/auth-provider-zitadel/internal/recoverymail"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	notificationv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -442,5 +444,99 @@ func TestAccountRecovery_UnsetExpiryFallsBack(t *testing.T) {
 
 	if got := varsOf(emails(t, c)[0])["ExpiryMinutes"]; got != "60" {
 		t.Fatalf("ExpiryMinutes = %q, want the 60-minute fallback", got)
+	}
+}
+
+// recentRecoveryEmail is a mail this user was already sent, as recoverymail labels it.
+func recentRecoveryEmail(name string, ago time.Duration) *notificationv1alpha1.Email {
+	return &notificationv1alpha1.Email{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-ago)),
+			Labels: map[string]string{
+				recoverymail.LabelUser:        "user-1",
+				recoverymail.LabelRequestedBy: recoverymail.RequestedBySelf,
+			},
+		},
+	}
+}
+
+// Jose #3. userId is not secret and mTLS identifies auth-ui rather than an end user,
+// so without a per-user budget this endpoint was an unbounded High-priority mail
+// primitive against any verified account.
+func TestAccountRecovery_CooldownIs429AndMintsNothing(t *testing.T) {
+	cfg := recoveryConfig()
+	cfg.Cooldown = 2 * time.Minute
+	cfg.MaxPerHour = 5
+
+	h, c, minter := newRecoveryHandlerWith(t, cfg, interceptor.Funcs{},
+		verifiedUser(), recentRecoveryEmail("recent", 30*time.Second))
+
+	rec := postRecovery(t, h, recoveryBody)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if len(minter.calls) != 0 {
+		t.Fatalf("a throttled request must not mint a code, got %d calls", len(minter.calls))
+	}
+	if n := len(emails(t, c)); n != 1 {
+		t.Fatalf("expected only the pre-existing Email, got %d", n)
+	}
+}
+
+// The refusal says nothing about the account. This endpoint is reachable with any
+// userId, so "you were mailed 40 seconds ago" would confirm the account exists and
+// leak its recovery activity.
+func TestAccountRecovery_CooldownRefusalLeaksNothing(t *testing.T) {
+	cfg := recoveryConfig()
+	cfg.Cooldown = 2 * time.Minute
+
+	h, _, _ := newRecoveryHandlerWith(t, cfg, interceptor.Funcs{},
+		verifiedUser(), recentRecoveryEmail("recent", 30*time.Second))
+
+	body := postRecovery(t, h, recoveryBody).Body.String()
+
+	for _, leak := range []string{"user-1", "person@example.test", "30", "recent"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("429 body %q leaked %q", body, leak)
+		}
+	}
+}
+
+func TestAccountRecovery_CooldownPastIsAllowed(t *testing.T) {
+	cfg := recoveryConfig()
+	cfg.Cooldown = 2 * time.Minute
+	cfg.MaxPerHour = 5
+
+	h, _, minter := newRecoveryHandlerWith(t, cfg, interceptor.Funcs{},
+		verifiedUser(), recentRecoveryEmail("old", 10*time.Minute))
+
+	if rec := postRecovery(t, h, recoveryBody); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 past the cooldown, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if len(minter.calls) != 1 {
+		t.Fatalf("expected one mint, got %d", len(minter.calls))
+	}
+}
+
+// An unreadable list is not evidence that nothing was sent, so the request fails
+// closed rather than being waved through unthrottled.
+func TestAccountRecovery_CooldownLookupFailureFailsClosed(t *testing.T) {
+	cfg := recoveryConfig()
+	cfg.Cooldown = 2 * time.Minute
+
+	h, _, minter := newRecoveryHandlerWith(t, cfg, interceptor.Funcs{
+		List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+			return errors.New("apiserver unavailable")
+		},
+	}, verifiedUser())
+
+	if rec := postRecovery(t, h, recoveryBody); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rec.Code)
+	}
+	if len(minter.calls) != 0 {
+		t.Fatalf("expected no mint, got %d calls", len(minter.calls))
 	}
 }

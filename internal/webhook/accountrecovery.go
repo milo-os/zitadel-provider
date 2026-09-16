@@ -45,6 +45,10 @@ type AccountRecoveryConfig struct {
 	// which absorbs the race against create-user-account.
 	UserLookupAttempts int
 	UserLookupBaseWait time.Duration
+	// Cooldown and MaxPerHour are the per-user mail budget. Zero disables that half
+	// of the check; see recoverymail.TooSoon for why the budget exists at all.
+	Cooldown   time.Duration
+	MaxPerHour int
 }
 
 type AccountRecoveryHandler struct {
@@ -153,6 +157,23 @@ func (h *AccountRecoveryHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		// It runs before the mint, so an unverified target costs Zitadel nothing either.
 		log.Info("Refusing recovery mail for unverified address", "userId", req.UserID)
 		http.Error(w, "email address is not verified", http.StatusUnprocessableEntity)
+		return
+	}
+
+	tooSoon, err := recoverymail.TooSoon(r.Context(), h.client, h.cfg.NotificationNamespace,
+		req.UserID, recoverymail.RequestedBySelf, h.cfg.Cooldown, h.cfg.MaxPerHour)
+	if err != nil {
+		// Fail closed: an unreadable list is not evidence that nothing was sent, and
+		// waving the request through would hand an attacker the bypass.
+		log.Error(err, "Failed to evaluate the recovery mail budget", "userId", req.UserID)
+		http.Error(w, "failed to check recent activity", http.StatusInternalServerError)
+		return
+	}
+	if tooSoon {
+		// No detail. This endpoint is reachable with any userId, so naming the account
+		// or when it was last mailed would confirm it exists and leak its activity.
+		log.Info("Refusing recovery mail; the user is inside the cooldown", "userId", req.UserID)
+		http.Error(w, "try again later", http.StatusTooManyRequests)
 		return
 	}
 

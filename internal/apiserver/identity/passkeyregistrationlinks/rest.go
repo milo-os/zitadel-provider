@@ -61,6 +61,10 @@ type Options struct {
 	// value fails at startup rather than on a support engineer's first request.
 	CompleteURL   string
 	ExpiryMinutes int
+	// Cooldown and MaxPerHour are the per-user mail budget, shared with the self-serve
+	// webhook. Zero disables that half of the check; see recoverymail.TooSoon.
+	Cooldown   time.Duration
+	MaxPerHour int
 }
 
 type REST struct {
@@ -72,6 +76,8 @@ type REST struct {
 	SupportTemplateName   string
 	NotificationNamespace string
 	ExpiryMinutes         int
+	Cooldown              time.Duration
+	MaxPerHour            int
 
 	completeURL *url.URL
 }
@@ -87,6 +93,8 @@ func New(opts Options) (*REST, error) {
 		SupportTemplateName:   opts.SupportTemplateName,
 		NotificationNamespace: opts.NotificationNamespace,
 		ExpiryMinutes:         opts.ExpiryMinutes,
+		Cooldown:              opts.Cooldown,
+		MaxPerHour:            opts.MaxPerHour,
 		completeURL:           completeURL,
 	}, nil
 }
@@ -155,6 +163,20 @@ func (r *REST) Create(
 		// silent one the self-serve path gives: there is no enumeration risk here.
 		return nil, apierrors.NewBadRequest(
 			"the user's email address is not verified; ask them to sign up again to receive a verification link")
+	}
+
+	tooSoon, err := recoverymail.TooSoon(ctx, r.Milo, r.NotificationNamespace, target,
+		recoverymail.RequestedBySupport, r.Cooldown, r.MaxPerHour)
+	if err != nil {
+		// Fail closed: an unreadable list is not evidence that nothing was sent.
+		klog.ErrorS(err, "Failed to evaluate the recovery mail budget", "userID", target)
+		return nil, apierrors.NewInternalError(fmt.Errorf("check recent recovery mail"))
+	}
+	if tooSoon {
+		// Support is a trusted, SAR-gated caller, so this names the constraint rather
+		// than hiding it the way the self-serve endpoint must.
+		return nil, apierrors.NewTooManyRequests(
+			fmt.Sprintf("a recovery link was already sent to user %q recently; wait before sending another", target), 0)
 	}
 
 	codeID, code, err := r.Z.CreatePasskeyRegistrationLink(ctx, target)

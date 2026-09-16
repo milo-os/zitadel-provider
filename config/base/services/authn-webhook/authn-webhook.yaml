@@ -45,6 +45,8 @@ spec:
             - --account-recovery-template=$(ACCOUNT_RECOVERY_TEMPLATE)
             - --account-recovery-allowed-origins=$(ACCOUNT_RECOVERY_ALLOWED_ORIGINS)
             - --account-recovery-expiry-minutes=$(ACCOUNT_RECOVERY_EXPIRY_MINUTES)
+            - --account-recovery-cooldown=$(ACCOUNT_RECOVERY_COOLDOWN)
+            - --account-recovery-max-per-hour=$(ACCOUNT_RECOVERY_MAX_PER_HOUR)
             - --notification-namespace=$(NOTIFICATION_NAMESPACE)
           env:
             - name: WEBHOOK_PORT
@@ -83,6 +85,13 @@ spec:
               value: ""
             - name: ACCOUNT_RECOVERY_EXPIRY_MINUTES
               value: "60"
+            # The per-user mail budget. Recovery is pre-authentication, so the
+            # requester cannot be bound to the account: this and the origin
+            # allowlist are the only controls that apply. "0" disables either half.
+            - name: ACCOUNT_RECOVERY_COOLDOWN
+              value: "2m"
+            - name: ACCOUNT_RECOVERY_MAX_PER_HOUR
+              value: "5"
             - name: NOTIFICATION_NAMESPACE
               value: milo-system
           ports:

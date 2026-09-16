@@ -70,6 +70,8 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 		accountRecoverySupportTemplate string
 		accountRecoveryCompleteURL     string
 		accountRecoveryExpiryMinutes   int
+		accountRecoveryCooldown        time.Duration
+		accountRecoveryMaxPerHour      int
 		notificationNamespace          string
 	)
 
@@ -213,6 +215,8 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 				NotificationNamespace: notificationNamespace,
 				CompleteURL:           accountRecoveryCompleteURL,
 				ExpiryMinutes:         accountRecoveryExpiryMinutes,
+				Cooldown:              accountRecoveryCooldown,
+				MaxPerHour:            accountRecoveryMaxPerHour,
 			})
 			if err != nil {
 				return fmt.Errorf("init passkeyregistrationlinks storage: %w", err)
@@ -265,6 +269,10 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 		"Landing URL for the mailed recovery link, e.g. https://auth.datum.net/recover/complete")
 	cmd.Flags().IntVar(&accountRecoveryExpiryMinutes, "account-recovery-expiry-minutes", 60,
 		"Recovery code lifetime shown to users; must match Zitadel's PasswordlessInitCode lifetime")
+	cmd.Flags().DurationVar(&accountRecoveryCooldown, "account-recovery-cooldown", 2*time.Minute,
+		"Minimum gap between support recovery links for one user; 0 disables the cooldown")
+	cmd.Flags().IntVar(&accountRecoveryMaxPerHour, "account-recovery-max-per-hour", 5,
+		"Maximum support recovery links per user per hour; 0 disables the cap")
 	cmd.Flags().StringVar(&notificationNamespace, "notification-namespace", "milo-system",
 		"Namespace in which Email resources are created")
 
