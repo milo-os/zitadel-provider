@@ -5,8 +5,10 @@
 // the same mail and the same audit record. The Email is that record: the identity
 // apiserver is virtual and persists nothing, so who asked and why are stamped here.
 //
-// The registration code is a bearer credential. It reaches exactly one field — the
-// "Code" variable — and is never part of the object name, a label, or an annotation.
+// The registration code is a bearer credential. It reaches exactly two fields — the
+// "Code" variable, and the fragment of the "ActionUrl" variable, which browsers never
+// send to a server. It is never part of the object name, a label, an annotation, a log
+// field, an error message, or the query string of that URL.
 package recoverymail
 
 import (
@@ -119,15 +121,31 @@ func Build(in Input) *notificationv1alpha1.Email {
 	return email
 }
 
-// ActionURL adds the three values the recovery ceremony needs to an already-validated
-// base URL. It takes the parsed URL rather than a raw string so the link cannot be
-// built from a destination the caller's allowlist did not approve.
+// ActionURL adds the values the recovery ceremony needs to an already-validated base
+// URL. It takes the parsed URL rather than a raw string so the link cannot be built
+// from a destination the caller's allowlist did not approve.
+//
+// userId and codeId are identifiers, not credentials, and stay in the query where the
+// landing page can read them server-side. The code goes in the FRAGMENT, which
+// browsers never send to a server: not in the request line, not in a Referer. In the
+// query it would have been written verbatim into the landing host's access logs, its
+// ingress or CDN logs and its APM — systems retained longer, replicated wider and
+// access-controlled far more loosely than anything meant to hold secrets, and often
+// shipped to a third party. Since Zitadel's v2 API cannot revoke an issued
+// registration code, every one of those copies is a working passkey-enrollment
+// credential until it expires. The fragment collapses that back to the browser the
+// user opened the link in.
+//
+// The fragment is form-urlencoded so the landing page can read it with
+// URLSearchParams and get the code back byte for byte. It is appended rather than
+// assigned to u.Fragment because url.URL re-escapes a fragment under rules that leave
+// "+" alone, which URLSearchParams would then decode as a space.
 func ActionURL(base *url.URL, userID, codeID, code string) string {
 	u := *base
 	q := u.Query()
 	q.Set("userId", userID)
 	q.Set("codeId", codeID)
-	q.Set("code", code)
 	u.RawQuery = q.Encode()
-	return u.String()
+	u.Fragment = ""
+	return u.String() + "#" + url.Values{"code": {code}}.Encode()
 }

@@ -37,11 +37,12 @@ type WebhookServerConfig struct {
 	// AccountRecoveryTemplate is the EmailTemplate resource used for self-serve
 	// account-recovery mail. Empty disables the endpoint entirely — the route is not
 	// registered, so an unconfigured deployment cannot send.
+	//
+	// There is deliberately no support template here. Support-branded mail is the
+	// apiserver's PasskeyRegistrationLink create, which authorizes the request and
+	// records who asked and why; this endpoint can do neither, so it must not be able
+	// to produce that copy.
 	AccountRecoveryTemplate string
-	// AccountRecoverySupportTemplate is the template whose copy says Datum Support
-	// sent the link. The request selects between the two names; it can never supply
-	// one, so a compromised caller cannot pick an arbitrary template.
-	AccountRecoverySupportTemplate string
 	// AccountRecoveryAllowedOrigins is the returnTo allowlist for recovery links.
 	// Empty rejects every request: a missing value must never read as "allow any host".
 	AccountRecoveryAllowedOrigins []string
@@ -49,6 +50,19 @@ type WebhookServerConfig struct {
 	// lifetime. It is a COPY of state we do not own; if the lifetime changes in
 	// Zitadel this number silently starts lying to users.
 	AccountRecoveryExpiryMinutes int
+	// AccountRecoveryCooldown and AccountRecoveryMaxPerHour are the per-user mail
+	// budget. Recovery is pre-authentication, so the requester cannot be bound to the
+	// account: this budget and the origin allowlist are the only controls that apply.
+	// Zero disables that half of the check.
+	AccountRecoveryCooldown   time.Duration
+	AccountRecoveryMaxPerHour int
+
+	// MailWebhookAllowedClientNames pins WHICH mTLS caller may reach the mail
+	// endpoints, by leaf certificate CN or URI SAN. ClientCAFile proves only that the
+	// caller holds a certificate this CA signed — in a cluster where one CA issues to
+	// many workloads, that is every one of them. Empty allows any signed caller and
+	// draws a startup warning; production sets it.
+	MailWebhookAllowedClientNames []string
 
 	// ClientCAFile enables mTLS. Without it the endpoint would accept any caller that
 	// can reach the Service, so runWebhookServer refuses to start when either mail
@@ -69,6 +83,8 @@ func NewWebhookServerConfig() *WebhookServerConfig {
 		NotificationNamespace:               "milo-system",
 		EmailVerificationExpiryMinutes:      60,
 		AccountRecoveryExpiryMinutes:        60,
+		AccountRecoveryCooldown:             2 * time.Minute,
+		AccountRecoveryMaxPerHour:           5,
 		EmailVerificationUserLookupAttempts: 5,
 		EmailVerificationUserLookupBaseWait: 200 * time.Millisecond,
 	}

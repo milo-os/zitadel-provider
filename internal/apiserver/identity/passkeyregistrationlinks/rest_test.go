@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
 	"go.miloapis.com/auth-provider-zitadel/internal/recoverymail"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
@@ -97,6 +100,16 @@ type harness struct {
 
 func newREST(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *harness {
 	t.Helper()
+	return newRESTWith(t, func(*Options) {}, funcs, objs...)
+}
+
+func newRESTWith(
+	t *testing.T,
+	tune func(*Options),
+	funcs interceptor.Funcs,
+	objs ...client.Object,
+) *harness {
+	t.Helper()
 	z := &fakeZitadelAPI{}
 	sar := &fakeSAR{allowed: true}
 	milo := fake.NewClientBuilder().
@@ -105,17 +118,36 @@ func newREST(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *harn
 		WithInterceptorFuncs(funcs).
 		Build()
 
-	r, err := New(Options{
+	opts := Options{
 		Z: z, Milo: milo, MiloSAR: sar, Enabled: true,
 		SupportTemplateName:   "recovery-support-tpl",
 		NotificationNamespace: "default",
 		CompleteURL:           "https://auth.example.test/recover/complete",
 		ExpiryMinutes:         60,
-	})
+	}
+	tune(&opts)
+
+	r, err := New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return &harness{rest: r, z: z, sar: sar, milo: milo}
+}
+
+// sentSupportMail is a support recovery mail this user already got, labelled as
+// recoverymail labels the real thing.
+func sentSupportMail(name string, ago time.Duration) *notificationv1alpha1.Email {
+	return &notificationv1alpha1.Email{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-ago)),
+			Labels: map[string]string{
+				recoverymail.LabelUser:        "user-1",
+				recoverymail.LabelRequestedBy: recoverymail.RequestedBySupport,
+			},
+		},
+	}
 }
 
 func callerCtx() context.Context {
@@ -432,4 +464,132 @@ func TestRESTInterface(t *testing.T) {
 		t.Errorf("GetSingularName() = %q", got)
 	}
 	h.rest.Destroy()
+}
+
+// The same per-user budget the self-serve webhook enforces. Support is SAR-gated, so
+// here the cap is a sanity bound — a stuck staff-portal retry loop, not an attacker.
+func TestCreate_CooldownIsTooManyRequests(t *testing.T) {
+	h := newRESTWith(t, func(o *Options) {
+		o.Cooldown = 2 * time.Minute
+		o.MaxPerHour = 5
+	}, interceptor.Funcs{}, verifiedUser(), sentSupportMail("recent", 30*time.Second))
+
+	_, err := create(t, h, link())
+
+	if !apierrors.IsTooManyRequests(err) {
+		t.Fatalf("expected TooManyRequests, got %v", err)
+	}
+	if h.z.calls != 0 {
+		t.Fatalf("a throttled create must not mint a code, got %d calls", h.z.calls)
+	}
+	if n := len(emails(t, h.milo)); n != 1 {
+		t.Fatalf("expected only the pre-existing Email, got %d", n)
+	}
+}
+
+func TestCreate_PastTheCooldownIsAllowed(t *testing.T) {
+	h := newRESTWith(t, func(o *Options) {
+		o.Cooldown = 2 * time.Minute
+		o.MaxPerHour = 5
+	}, interceptor.Funcs{}, verifiedUser(), sentSupportMail("old", 10*time.Minute))
+
+	if _, err := create(t, h, link()); err != nil {
+		t.Fatalf("expected success past the cooldown, got %v", err)
+	}
+	if h.z.calls != 1 {
+		t.Fatalf("expected one mint, got %d", h.z.calls)
+	}
+}
+
+// An unreadable list is not evidence that nothing was sent.
+func TestCreate_CooldownLookupFailureFailsClosed(t *testing.T) {
+	h := newRESTWith(t, func(o *Options) {
+		o.Cooldown = 2 * time.Minute
+	}, interceptor.Funcs{
+		List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+			return errors.New("apiserver unavailable")
+		},
+	}, verifiedUser())
+
+	_, err := create(t, h, link())
+
+	if err == nil {
+		t.Fatal("expected an error when the budget cannot be evaluated")
+	}
+	if h.z.calls != 0 {
+		t.Fatalf("expected no mint, got %d calls", h.z.calls)
+	}
+}
+
+// newOpts is a configuration that New must accept, for the tests that break exactly
+// one field at a time.
+func newOpts() Options {
+	return Options{
+		Enabled:               true,
+		SupportTemplateName:   "recovery-support-tpl",
+		NotificationNamespace: "default",
+		CompleteURL:           "https://auth.example.test/recover/complete",
+		ExpiryMinutes:         60,
+	}
+}
+
+// S2. Enabled with no template would have minted a live, unrevocable code and then
+// built an Email with an empty templateRef — a credential spent on a mail that cannot
+// render. Symmetric with the --client-ca-file guard: refuse to start.
+func TestNew_RejectsEnabledWithoutSupportTemplate(t *testing.T) {
+	opts := newOpts()
+	opts.SupportTemplateName = ""
+
+	if _, err := New(opts); err == nil {
+		t.Fatal("expected New to reject --recovery-links-enabled without a support template")
+	}
+}
+
+// S3. url.Parse("") and url.Parse("/relative") both succeed, so the existing parse
+// check passed values that cannot become a mailed link. Same rule the webhook applies
+// to returnTo.
+func TestNew_RejectsUnusableCompleteURL(t *testing.T) {
+	for name, completeURL := range map[string]string{
+		"empty":        "",
+		"relative":     "/recover/complete",
+		"no scheme":    "auth.example.test/recover/complete",
+		"has userinfo": "https://evil.com@auth.example.test/recover/complete",
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := newOpts()
+			opts.CompleteURL = completeURL
+
+			if _, err := New(opts); err == nil {
+				t.Fatalf("expected New to reject --account-recovery-complete-url %q", completeURL)
+			}
+		})
+	}
+}
+
+// The shipped default is an empty complete URL and an empty template, with the
+// feature off. That has to keep booting, or every deployment breaks on upgrade.
+func TestNew_DisabledToleratesTheShippedDefaults(t *testing.T) {
+	if _, err := New(Options{Enabled: false, NotificationNamespace: "default"}); err != nil {
+		t.Fatalf("the dormant default configuration must start: %v", err)
+	}
+}
+
+// S5. st.Message() is Zitadel's text about Zitadel's internals, reaching an API
+// client that asked this apiserver a question. It goes to the log instead.
+func TestTranslateErr_InvalidArgumentDoesNotEchoZitadel(t *testing.T) {
+	const zitadelDetail = "user 12345: passwordless init code XYZ already exists in org 999"
+
+	err := translateErr(status.Error(codes.InvalidArgument, zitadelDetail), "user-1")
+
+	if !apierrors.IsBadRequest(err) {
+		t.Fatalf("expected BadRequest, got %v", err)
+	}
+	if strings.Contains(err.Error(), zitadelDetail) {
+		t.Fatalf("the returned error echoed Zitadel's message: %q", err.Error())
+	}
+	for _, leak := range []string{"12345", "XYZ", "999"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the returned error leaked %q: %q", leak, err.Error())
+		}
+	}
 }

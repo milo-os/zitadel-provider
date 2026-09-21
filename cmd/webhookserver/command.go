@@ -20,6 +20,7 @@ import (
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	webhook "go.miloapis.com/auth-provider-zitadel/internal/webhook"
 	token "go.miloapis.com/auth-provider-zitadel/pkg/token"
+	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
 
 // NewAuthenticationWebhookServerCommand returns a cobra command that starts the UserDeactivation
@@ -68,12 +69,18 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	// create Emails in the same place.
 	cmd.Flags().StringVar(&cfg.AccountRecoveryTemplate, "account-recovery-template", cfg.AccountRecoveryTemplate,
 		"EmailTemplate resource for self-serve account recovery mail; empty disables the endpoint")
-	cmd.Flags().StringVar(&cfg.AccountRecoverySupportTemplate, "account-recovery-support-template", cfg.AccountRecoverySupportTemplate,
-		"EmailTemplate resource for support-triggered account recovery mail")
 	cmd.Flags().StringSliceVar(&cfg.AccountRecoveryAllowedOrigins, "account-recovery-allowed-origins", nil,
 		"Allowlisted origins for returnTo, e.g. https://auth.example.net,http://localhost:3000")
 	cmd.Flags().IntVar(&cfg.AccountRecoveryExpiryMinutes, "account-recovery-expiry-minutes", cfg.AccountRecoveryExpiryMinutes,
 		"Recovery code lifetime shown to users; must match Zitadel's PasswordlessInitCode lifetime")
+	cmd.Flags().DurationVar(&cfg.AccountRecoveryCooldown, "account-recovery-cooldown", cfg.AccountRecoveryCooldown,
+		"Minimum gap between recovery mails for one user; 0 disables the cooldown")
+	cmd.Flags().IntVar(&cfg.AccountRecoveryMaxPerHour, "account-recovery-max-per-hour", cfg.AccountRecoveryMaxPerHour,
+		"Maximum recovery mails per user per hour; 0 disables the cap")
+
+	cmd.Flags().StringSliceVar(&cfg.MailWebhookAllowedClientNames, "mail-webhook-allowed-client-names", nil,
+		"Client certificate CNs and/or URI SANs allowed to reach the mail endpoints, e.g. auth-ui; "+
+			"empty accepts any client the CA signed")
 
 	cmd.Flags().StringVar(&cfg.ClientCAFile, "client-ca-file", cfg.ClientCAFile,
 		"Filename in the directory that contains the CA bundle used to verify client certificates (mTLS)")
@@ -99,6 +106,22 @@ func validateWebhookConfig(cfg *config.WebhookServerConfig) error {
 	return nil
 }
 
+// unpinnedCallerWarning names the configuration that leaves the mail endpoints open
+// to every workload the client CA signed. It is a warning rather than a boot failure
+// because the endpoints were shipped that way and a cluster with a single-purpose CA
+// is a legitimate deployment; the runbook makes the allowlist a production
+// requirement. Kept out of runWebhookServer so a test can reach it without a cluster.
+func unpinnedCallerWarning(cfg *config.WebhookServerConfig) string {
+	if cfg.EmailVerificationTemplate == "" && cfg.AccountRecoveryTemplate == "" {
+		return ""
+	}
+	if len(webhook.NormalizeClientNames(cfg.MailWebhookAllowedClientNames)) > 0 {
+		return ""
+	}
+	return "mail endpoints accept any client signed by the CA; " +
+		"set --mail-webhook-allowed-client-names to pin the caller"
+}
+
 func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error {
 	if err := validateWebhookConfig(cfg); err != nil {
 		return err
@@ -106,6 +129,11 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 
 	logf.SetLogger(zap.New(zap.JSONEncoder()))
 	log := logf.Log.WithName("authentication-webhook")
+
+	if warning := unpinnedCallerWarning(cfg); warning != "" {
+		log.Info("WARNING: " + warning)
+	}
+	allowedClients := webhook.NormalizeClientNames(cfg.MailWebhookAllowedClientNames)
 
 	log.Info("Starting authentication webhook server",
 		"cert_dir", cfg.CertDir,
@@ -189,6 +217,7 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 			TemplateName:          cfg.EmailVerificationTemplate,
 			NotificationNamespace: cfg.NotificationNamespace,
 			AllowedOrigins:        cfg.EmailVerificationAllowedOrigins,
+			AllowedClientNames:    allowedClients,
 			ExpiryMinutes:         cfg.EmailVerificationExpiryMinutes,
 			UserLookupAttempts:    cfg.EmailVerificationUserLookupAttempts,
 			UserLookupBaseWait:    cfg.EmailVerificationUserLookupBaseWait,
@@ -196,18 +225,33 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		hookServer.Register(verify.Endpoint, verify)
 		log.Info("Registered email verification endpoint",
 			"endpoint", verify.Endpoint,
-			"allowedOrigins", cfg.EmailVerificationAllowedOrigins)
+			"allowedOrigins", cfg.EmailVerificationAllowedOrigins,
+			"allowedClientNames", allowedClients)
 	} else {
 		log.Info("Email verification endpoint disabled; no template configured")
 	}
 
 	if cfg.AccountRecoveryTemplate != "" {
-		recovery := webhook.NewAccountRecoveryHandler(directClient, webhook.AccountRecoveryConfig{
+		// The recovery endpoint mints the code itself rather than relaying one the
+		// caller supplied, so it needs a Zitadel client. Same machine-account key the
+		// introspector above already uses; NewSDK strips the scheme off Domain.
+		zc, err := zitadel.NewSDK(cmd.Context(), zitadel.SDKConfig{
+			Domain:  cfg.ZitadelDomain,
+			Issuer:  cfg.ZitadelDomain,
+			KeyPath: cfg.ZitadelPrivateKey,
+		})
+		if err != nil {
+			return fmt.Errorf("init zitadel sdk for account recovery: %w", err)
+		}
+
+		recovery := webhook.NewAccountRecoveryHandler(directClient, zc, webhook.AccountRecoveryConfig{
 			TemplateName:          cfg.AccountRecoveryTemplate,
-			SupportTemplateName:   cfg.AccountRecoverySupportTemplate,
 			NotificationNamespace: cfg.NotificationNamespace,
 			AllowedOrigins:        cfg.AccountRecoveryAllowedOrigins,
+			AllowedClientNames:    allowedClients,
 			ExpiryMinutes:         cfg.AccountRecoveryExpiryMinutes,
+			Cooldown:              cfg.AccountRecoveryCooldown,
+			MaxPerHour:            cfg.AccountRecoveryMaxPerHour,
 			// Shared with verification: both race the same provisioning path.
 			UserLookupAttempts: cfg.EmailVerificationUserLookupAttempts,
 			UserLookupBaseWait: cfg.EmailVerificationUserLookupBaseWait,
@@ -215,7 +259,8 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		hookServer.Register(recovery.Endpoint, recovery)
 		log.Info("Registered account recovery endpoint",
 			"endpoint", recovery.Endpoint,
-			"allowedOrigins", cfg.AccountRecoveryAllowedOrigins)
+			"allowedOrigins", cfg.AccountRecoveryAllowedOrigins,
+			"allowedClientNames", allowedClients)
 	} else {
 		log.Info("Account recovery endpoint disabled; no template configured")
 	}

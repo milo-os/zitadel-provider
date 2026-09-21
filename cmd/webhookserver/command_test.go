@@ -80,3 +80,51 @@ func TestValidateWebhookConfig_RecoveryTemplateRequiresClientCA(t *testing.T) {
 		})
 	}
 }
+
+// S1. An empty allowlist is a supported configuration — mTLS still proves the caller
+// was signed by the configured CA — but it means every workload holding a cert from
+// that CA can reach the mail endpoints. That has to be loud at startup rather than
+// discovered later, so the warning is a function a test can reach without a cluster,
+// the same way validateWebhookConfig is.
+func TestUnpinnedCallerWarning(t *testing.T) {
+	tests := map[string]struct {
+		cfg  config.WebhookServerConfig
+		warn bool
+	}{
+		"no mail endpoint, nothing to warn about": {
+			config.WebhookServerConfig{}, false,
+		},
+		"recovery on, no allowlist": {
+			config.WebhookServerConfig{AccountRecoveryTemplate: "tpl", ClientCAFile: "ca.crt"}, true,
+		},
+		"verification on, no allowlist": {
+			config.WebhookServerConfig{EmailVerificationTemplate: "tpl", ClientCAFile: "ca.crt"}, true,
+		},
+		"an empty flag value is not an allowlist": {
+			config.WebhookServerConfig{
+				AccountRecoveryTemplate:       "tpl",
+				ClientCAFile:                  "ca.crt",
+				MailWebhookAllowedClientNames: []string{""},
+			}, true,
+		},
+		"allowlist set, nothing to warn about": {
+			config.WebhookServerConfig{
+				AccountRecoveryTemplate:       "tpl",
+				ClientCAFile:                  "ca.crt",
+				MailWebhookAllowedClientNames: []string{"auth-ui"},
+			}, false,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := unpinnedCallerWarning(&tt.cfg)
+
+			if tt.warn && got == "" {
+				t.Fatal("expected a warning")
+			}
+			if !tt.warn && got != "" {
+				t.Fatalf("expected no warning, got %q", got)
+			}
+		})
+	}
+}

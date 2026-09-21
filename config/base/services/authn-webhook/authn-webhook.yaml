@@ -39,13 +39,15 @@ spec:
             - --jwt-expiration=$(JWT_EXPIRATION)
             - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
             - --client-ca-file=$(CLIENT_CA_FILE)
+            - --mail-webhook-allowed-client-names=$(MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES)
             - --email-verification-template=$(EMAIL_VERIFICATION_TEMPLATE)
             - --email-verification-allowed-origins=$(EMAIL_VERIFICATION_ALLOWED_ORIGINS)
             - --email-verification-expiry-minutes=$(EMAIL_VERIFICATION_EXPIRY_MINUTES)
             - --account-recovery-template=$(ACCOUNT_RECOVERY_TEMPLATE)
-            - --account-recovery-support-template=$(ACCOUNT_RECOVERY_SUPPORT_TEMPLATE)
             - --account-recovery-allowed-origins=$(ACCOUNT_RECOVERY_ALLOWED_ORIGINS)
             - --account-recovery-expiry-minutes=$(ACCOUNT_RECOVERY_EXPIRY_MINUTES)
+            - --account-recovery-cooldown=$(ACCOUNT_RECOVERY_COOLDOWN)
+            - --account-recovery-max-per-hour=$(ACCOUNT_RECOVERY_MAX_PER_HOUR)
             - --notification-namespace=$(NOTIFICATION_NAMESPACE)
           env:
             - name: WEBHOOK_PORT
@@ -73,6 +75,13 @@ spec:
             # whole webhook server, and nothing is mounted here to satisfy it.
             - name: CLIENT_CA_FILE
               value: ""
+            # Which mTLS callers may reach the mail endpoints, by client certificate
+            # CN and/or URI SAN. CLIENT_CA_FILE proves only that a caller holds a
+            # cert this CA signed; where one CA issues to many workloads that is all
+            # of them. Empty accepts any signed caller and logs a startup warning —
+            # production sets this.
+            - name: MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES
+              value: ""
             - name: EMAIL_VERIFICATION_EXPIRY_MINUTES
               value: "60"
             # Empty leaves the recovery endpoint unregistered; an overlay opts in.
@@ -80,12 +89,17 @@ spec:
             # refuses to start without it rather than serve the endpoint unauthenticated.
             - name: ACCOUNT_RECOVERY_TEMPLATE
               value: ""
-            - name: ACCOUNT_RECOVERY_SUPPORT_TEMPLATE
-              value: ""
             - name: ACCOUNT_RECOVERY_ALLOWED_ORIGINS
               value: ""
             - name: ACCOUNT_RECOVERY_EXPIRY_MINUTES
               value: "60"
+            # The per-user mail budget. Recovery is pre-authentication, so the
+            # requester cannot be bound to the account: this and the origin
+            # allowlist are the only controls that apply. "0" disables either half.
+            - name: ACCOUNT_RECOVERY_COOLDOWN
+              value: "2m"
+            - name: ACCOUNT_RECOVERY_MAX_PER_HOUR
+              value: "5"
             - name: NOTIFICATION_NAMESPACE
               value: milo-system
           ports:

@@ -61,6 +61,10 @@ type Options struct {
 	// value fails at startup rather than on a support engineer's first request.
 	CompleteURL   string
 	ExpiryMinutes int
+	// Cooldown and MaxPerHour are the per-user mail budget, shared with the self-serve
+	// webhook. Zero disables that half of the check; see recoverymail.TooSoon.
+	Cooldown   time.Duration
+	MaxPerHour int
 }
 
 type REST struct {
@@ -72,21 +76,46 @@ type REST struct {
 	SupportTemplateName   string
 	NotificationNamespace string
 	ExpiryMinutes         int
+	Cooldown              time.Duration
+	MaxPerHour            int
 
 	completeURL *url.URL
 }
 
 // New validates the options and builds the storage.
+//
+// The guards apply only while Enabled: the shipped default is the feature off with an
+// empty template and an empty complete URL, and that has to keep booting. Once it is
+// on, a misconfiguration must fail at startup rather than on a support engineer's
+// first request — by which point a live, unrevocable code has already been minted.
 func New(opts Options) (*REST, error) {
 	completeURL, err := url.Parse(opts.CompleteURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse --account-recovery-complete-url: %w", err)
+	}
+	if opts.Enabled {
+		if opts.SupportTemplateName == "" {
+			// Otherwise the create mints a code and then builds an Email with an empty
+			// templateRef: the credential is spent on a mail that cannot render.
+			return nil, fmt.Errorf(
+				"--account-recovery-support-template is required when --recovery-links-enabled is set")
+		}
+		// url.Parse("") and url.Parse("/relative") both succeed, so parsing alone
+		// admits values that cannot become a mailed link. Same rule the webhook
+		// applies to returnTo, including the userinfo case.
+		if completeURL.Scheme == "" || completeURL.Host == "" || completeURL.User != nil {
+			return nil, fmt.Errorf(
+				"--account-recovery-complete-url must be an absolute URL with no userinfo, e.g. "+
+					"https://auth.example.net/recover/complete (got %q)", opts.CompleteURL)
+		}
 	}
 	return &REST{
 		Z: opts.Z, Milo: opts.Milo, MiloSAR: opts.MiloSAR, Enabled: opts.Enabled,
 		SupportTemplateName:   opts.SupportTemplateName,
 		NotificationNamespace: opts.NotificationNamespace,
 		ExpiryMinutes:         opts.ExpiryMinutes,
+		Cooldown:              opts.Cooldown,
+		MaxPerHour:            opts.MaxPerHour,
 		completeURL:           completeURL,
 	}, nil
 }
@@ -157,6 +186,20 @@ func (r *REST) Create(
 			"the user's email address is not verified; ask them to sign up again to receive a verification link")
 	}
 
+	tooSoon, err := recoverymail.TooSoon(ctx, r.Milo, r.NotificationNamespace, target,
+		recoverymail.RequestedBySupport, r.Cooldown, r.MaxPerHour)
+	if err != nil {
+		// Fail closed: an unreadable list is not evidence that nothing was sent.
+		klog.ErrorS(err, "Failed to evaluate the recovery mail budget", "userID", target)
+		return nil, apierrors.NewInternalError(fmt.Errorf("check recent recovery mail"))
+	}
+	if tooSoon {
+		// Support is a trusted, SAR-gated caller, so this names the constraint rather
+		// than hiding it the way the self-serve endpoint must.
+		return nil, apierrors.NewTooManyRequests(
+			fmt.Sprintf("a recovery link was already sent to user %q recently; wait before sending another", target), 0)
+	}
+
 	codeID, code, err := r.Z.CreatePasskeyRegistrationLink(ctx, target)
 	if err != nil {
 		klog.ErrorS(err, "Failed to create passkey registration link", "userID", target) // err carries no code
@@ -208,7 +251,11 @@ func translateErr(err error, name string) error {
 		case codes.Unauthenticated:
 			return apierrors.NewUnauthorized("unauthenticated")
 		case codes.InvalidArgument:
-			return apierrors.NewBadRequest(st.Message())
+			// Not st.Message(): that is Zitadel's text about Zitadel's internals, and
+			// this error reaches a client who asked THIS apiserver a question. It can
+			// name users, orgs and code state the caller was never entitled to.
+			klog.ErrorS(err, "Zitadel rejected the registration link request", "userID", name)
+			return apierrors.NewBadRequest("invalid request to the auth provider")
 		case codes.DeadlineExceeded, codes.Unavailable:
 			return apierrors.NewServiceUnavailable("zitadel unavailable")
 		default:

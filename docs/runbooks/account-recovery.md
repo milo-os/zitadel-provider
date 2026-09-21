@@ -8,7 +8,7 @@ Two triggers produce the same mail from the same builder:
 
 | Trigger | Surface | Switch |
 |---|---|---|
-| Self-serve (`/recover` in auth-ui) | `POST /v1/email/recovery` on the authn-webhook | `--account-recovery-template` (empty = route not registered) |
+| Self-serve (`/recover` in auth-ui) | `POST /v1/email/recovery` on the authn-webhook — `requestedBy` accepts **only** `"self"` | `--account-recovery-template` (empty = route not registered) |
 | Support (staff-portal) | `create identity.miloapis.com/v1alpha1 PasskeyRegistrationLink` on the apiserver | `--recovery-links-enabled` (false = create returns 503) |
 
 See also [components/passkey-authentication.md](../components/passkey-authentication.md)
@@ -16,17 +16,57 @@ for the enrollment architecture these share.
 
 ## The code is a bearer credential
 
-Whoever holds it can enroll a passkey on that account. It therefore appears in exactly
-one place: the `Code` variable of the notification `Email`. It is never an object name,
-a label, an annotation, a log field, or an error message. If you are adding to this
-path, the tests that pin the property are `TestBuild_NameIsDeterministicAndCodeFree`,
-`TestAccountRecovery_CodeNeverLandsInObjectName`,
-`TestAccountRecovery_CreateFailureDoesNotEchoCode`,
-`TestCreate_CodeNeverLeavesTheEmail` and
-`TestCreate_EmailCreateFailureDoesNotEchoCode`.
+Whoever holds it can enroll a passkey on that account. It appears in exactly **two**
+places: the `Code` variable of the notification `Email`, and the **fragment** of that
+Email's `ActionUrl` variable — the part after `#`, which browsers never send to a
+server. It is never an object name, a label, an annotation, a log field, an error
+message, an API response, or the **query string** of that URL.
+
+The fragment is the whole point of the second location. In the query, the code was
+written verbatim into the landing host's access logs, its ingress or CDN logs and its
+APM — systems retained longer, replicated wider and access-controlled far more loosely
+than anything meant to hold secrets, and often shipped to a third party. Because there
+is no revocation (below), every one of those copies was a working passkey-enrollment
+credential until expiry. In the fragment it reaches only the browser the user opened
+the link in, and it is bounded further by single-use redemption at the landing page.
+
+If you are adding to this path, the tests that pin the property are:
+
+| Test | Pins |
+|---|---|
+| `TestBuild_NameIsDeterministicAndCodeFree` | not in the object name |
+| `TestAccountRecovery_CodeNeverLandsInObjectName` | not in the object name |
+| `TestActionURL_CodeTravelsInTheFragment` | not in the URL query; is in the fragment |
+| `TestActionURL_FragmentIsEscaped` | the fragment round-trips through `URLSearchParams` |
+| `TestBuild_ActionURLQueryNeverCarriesTheCode` | the assembled Email's `ActionUrl` query is clean |
+| `TestAccountRecovery_ResponseNeverCarriesTheCode` | not in the webhook's HTTP response |
+| `TestAccountRecovery_RejectsCallerSuppliedCode` | a caller cannot supply one |
+| `TestAccountRecovery_CreateFailureDoesNotEchoCode` | not in an error path |
+| `TestCreate_CodeNeverLeavesTheEmail` | not in the returned object |
+| `TestCreate_EmailCreateFailureDoesNotEchoCode` | not in an error path |
+
+**Do not add a log line, an audit forward, a support-tool link or a retry queue that
+carries the whole `ActionUrl`.** The `Code` variable is obviously a credential; the
+link is the one that does not look like one.
 
 There is **no recall**. Zitadel's v2 API cannot revoke an issued registration code; the
 expiry is the only mitigation. Support must know this before pressing the button.
+
+## The self-serve request contract
+
+`POST /v1/email/recovery` takes `{"userId", "returnTo", "requestedBy":"self"}` and
+answers `200 {"codeId":"..."}`.
+
+- The **webhook mints the code**, by calling Zitadel's `CreatePasskeyRegistrationLink`.
+  A request carrying `codeId` or `code` is rejected with `400`. Relaying a
+  caller-supplied code could not be checked against `userId`, and any random string was
+  a fresh `codeId` — which defeated the Email dedupe and bypassed Zitadel's own
+  throttle on minting.
+- `requestedBy` accepts **only** `"self"`. `"support"` is `400`: that trigger is the
+  apiserver create, which carries a SubjectAccessReview, a mandatory reason and a named
+  requester, and this endpoint has none of them.
+- The response carries the `codeId` and **never the code**. The caller asked for a mail
+  to be sent, not for the credential.
 
 ## Flags
 
@@ -40,17 +80,41 @@ flag as `--flag=$(ENV)`. The env names below are what an overlay patches.
 | Flag | Env | Default | Notes |
 |---|---|---|---|
 | `--account-recovery-template` | `ACCOUNT_RECOVERY_TEMPLATE` | `""` | Empty leaves the route unregistered. Setting it makes `--client-ca-file` mandatory. |
-| `--account-recovery-support-template` | `ACCOUNT_RECOVERY_SUPPORT_TEMPLATE` | `""` | The "Datum Support sent this" copy. |
 | `--account-recovery-allowed-origins` | `ACCOUNT_RECOVERY_ALLOWED_ORIGINS` | `""` | returnTo allowlist. **Empty rejects everything** — a missing value must never read as "allow any host". |
 | `--account-recovery-expiry-minutes` | `ACCOUNT_RECOVERY_EXPIRY_MINUTES` | `60` | A copy of Zitadel's `PasswordlessInitCode` lifetime. If that changes and this does not, the mail starts lying. |
+| `--account-recovery-cooldown` | `ACCOUNT_RECOVERY_COOLDOWN` | `2m` | Minimum gap between recovery mails for one user. `0` disables the cooldown. |
+| `--account-recovery-max-per-hour` | `ACCOUNT_RECOVERY_MAX_PER_HOUR` | `5` | Recovery mails per user per hour. `0` disables the cap. |
+| `--mail-webhook-allowed-client-names` | `MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES` | `""` | Client certificate CNs and/or URI SANs allowed to reach **both** mail endpoints. **Empty accepts any client the CA signed** and logs a startup warning. **Set this in production.** |
 
 `--notification-namespace` and the `--email-verification-user-lookup-*` retry flags are
 shared with verification; recovery adds no duplicates of them.
 
-**mTLS is enforced at startup, not at request time.** Setting the recovery template
+**mTLS is enforced at startup, not at request time.** Setting either mail template
 without `--client-ca-file` makes the process refuse to boot, because controller-runtime
 only requires client certs when a CA is configured — without it the endpoint would mail
 a working code to any caller that can reach the Service.
+
+**The CA proves the chain, not the identity.** `RequireAndVerifyClientCert` establishes
+only that the caller holds a certificate this CA signed. Where one CA issues certs to
+many workloads, that is *every* workload. `--mail-webhook-allowed-client-names` pins
+which one is meant, by leaf certificate CN or URI SAN, matched exactly — `auth-ui` does
+not admit `auth-ui-staging`. Leaving it empty is supported and is the shipped default,
+but it logs
+
+```
+WARNING: mail endpoints accept any client signed by the CA; set --mail-webhook-allowed-client-names to pin the caller
+```
+
+at startup. **Treat that warning as a production blocker.** Every mail-endpoint request
+logs the caller it resolved (`caller=<CN>`, else the first URI SAN, else `none`) on both
+the accepted and the rejected path, so an incident review can name the workload rather
+than only the CA.
+
+**Rotating or revoking the client CA needs a rolling restart.** controller-runtime's
+certwatcher watches the *serving* certificate; the client CA bundle is read once at
+process start. Replacing the CA secret — or removing a compromised intermediate from it
+— changes nothing for a running pod. Restart the Deployment and confirm the old client
+is refused before calling the revocation done.
 
 ### apiserver (support backstop)
 
@@ -62,7 +126,14 @@ a working code to any caller that can reach the Service.
 | `--account-recovery-support-template` | `ACCOUNT_RECOVERY_SUPPORT_TEMPLATE` | `""` | |
 | `--account-recovery-complete-url` | `ACCOUNT_RECOVERY_COMPLETE_URL` | `""` | Where the mailed link lands. Parsed at startup — a malformed value fails the boot, not a support engineer's first request. |
 | `--account-recovery-expiry-minutes` | `ACCOUNT_RECOVERY_EXPIRY_MINUTES` | `60` | |
+| `--account-recovery-cooldown` | `ACCOUNT_RECOVERY_COOLDOWN` | `2m` | Minimum gap between support links for one user. `0` disables the cooldown. |
+| `--account-recovery-max-per-hour` | `ACCOUNT_RECOVERY_MAX_PER_HOUR` | `5` | Support links per user per hour. `0` disables the cap. |
 | `--notification-namespace` | `NOTIFICATION_NAMESPACE` | `milo-system` | |
+
+With `--recovery-links-enabled=true`, both `--account-recovery-support-template` and an
+absolute `--account-recovery-complete-url` become mandatory — the process refuses to
+boot without them. Enabled with neither, the first support request would mint a live,
+unrevocable code and then fail to build a usable mail, with no way to recall it.
 
 Authorization is **not** Kubernetes RBAC. milo's apiserver authorizes through OpenFGA fed
 by milo `Role` / `ProtectedResource` / `PolicyBinding` objects; the create issues a
@@ -111,6 +182,51 @@ kubectl get emails -n milo-system \
 That label/annotation set **is** the audit record: the apiserver is virtual and persists
 no `PasskeyRegistrationLink`, so the `Email` is the only durable trace of who asked and
 why. staff-portal's "recovery links sent" history is this list.
+
+## The per-user mail budget
+
+Recovery is pre-authentication — the premise is a user who cannot authenticate — so the
+requester can never be bound to the account. Any suggestion of the form "check `userId`
+against the caller" is unimplementable here. The two controls that *do* apply to
+unauthenticated recovery are the origin allowlist and a per-user budget.
+
+The budget is `--account-recovery-cooldown` (default 2m) plus
+`--account-recovery-max-per-hour` (default 5), enforced on **both** triggers. The source
+of truth is the `Email` objects themselves, matched on the
+`identity.miloapis.com/user` and `identity.miloapis.com/recovery-requested-by` labels —
+not in-process state, because the webhook runs with replicas and a counter would reset
+on every rollout.
+
+**The budget is per user AND per trigger.** A self-serve flood spends only the
+self-serve budget; it cannot deny support the backstop that exists precisely for when
+self-serve has failed the user. Support is separately gated by a SubjectAccessReview,
+so its own cap is a sanity bound on a stuck staff-portal retry loop rather than a
+control against an attacker.
+
+| Trigger | Over budget | Body |
+|---|---|---|
+| Self-serve | `429` | `try again later` — nothing else |
+| Support | `429 TooManyRequests` | names the user and the constraint |
+
+The self-serve refusal is deliberately bare. That endpoint is reachable with any
+`userId`, so "you were mailed 40 seconds ago" would confirm the account exists and leak
+its recovery activity.
+
+**Both triggers fail closed.** If the `Email` list cannot be read, the request is
+refused (`500`) rather than waved through: an unreadable list is not evidence that
+nothing was sent, and the other behaviour would hand an attacker the bypass.
+
+To check the budget by hand:
+
+```sh
+kubectl get emails -n milo-system \
+  -l identity.miloapis.com/user=<zitadel-user-id> \
+  --sort-by=.metadata.creationTimestamp \
+  -o custom-columns=NAME:.metadata.name,BY:.metadata.labels['identity\.miloapis\.com/recovery-requested-by'],CREATED:.metadata.creationTimestamp
+```
+
+Deleting these objects resets the budget for that user, which is the manual override
+when a genuine user has locked themselves out of recovery.
 
 ## Verifying the emailVerification writer (C11)
 
