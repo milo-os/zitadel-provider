@@ -41,7 +41,35 @@ spec:
             - --zitadel-introspection-project-id=$(ZITADEL_INTROSPECTION_PROJECT_ID)
             - -v=4
             - --enable-impersonation-fallback=$(ENABLE_IMPERSONATION_FALLBACK)
+            - --recovery-links-enabled=$(RECOVERY_LINKS_ENABLED)
+            - --account-recovery-support-template=$(ACCOUNT_RECOVERY_SUPPORT_TEMPLATE)
+            - --account-recovery-complete-url=$(ACCOUNT_RECOVERY_COMPLETE_URL)
+            - --account-recovery-expiry-minutes=$(ACCOUNT_RECOVERY_EXPIRY_MINUTES)
+            - --account-recovery-cooldown=$(ACCOUNT_RECOVERY_COOLDOWN)
+            - --account-recovery-max-per-hour=$(ACCOUNT_RECOVERY_MAX_PER_HOUR)
+            - --notification-namespace=$(NOTIFICATION_NAMESPACE)
           env:
+            # The admin backstop's switch, owned by infra: while false the
+            # PasskeyRegistrationLink create returns 503, so the milo role that
+            # authorises it can ship dormant.
+            - name: RECOVERY_LINKS_ENABLED
+              value: "false"
+            - name: ACCOUNT_RECOVERY_SUPPORT_TEMPLATE
+              value: ""
+            - name: ACCOUNT_RECOVERY_COMPLETE_URL
+              value: ""
+            - name: ACCOUNT_RECOVERY_EXPIRY_MINUTES
+              value: "60"
+            # The per-user link budget, the same one the self-serve webhook
+            # enforces. Support is SAR-gated, so here it is a sanity bound on a
+            # stuck retry loop rather than a control against an attacker.
+            # "0" disables either half.
+            - name: ACCOUNT_RECOVERY_COOLDOWN
+              value: "2m"
+            - name: ACCOUNT_RECOVERY_MAX_PER_HOUR
+              value: "5"
+            - name: NOTIFICATION_NAMESPACE
+              value: milo-system
             - name: LOG_LEVEL
               value: "info"
             - name: LOG_FORMAT

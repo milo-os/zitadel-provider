@@ -42,6 +42,10 @@ type EmailVerificationConfig struct {
 	// which is the safe direction: a missing config must not become "allow any host".
 	AllowedOrigins []string
 	ExpiryMinutes  int
+	// AllowedClientNames pins WHICH mTLS caller may reach this endpoint, by leaf
+	// certificate CN or URI SAN. Empty allows any caller the client CA signed, which
+	// is the default and is why runWebhookServer warns about it at startup.
+	AllowedClientNames []string
 	// UserLookupAttempts and UserLookupBaseWait bound the retry in userWithRetry
 	// below, which absorbs the signup race against create-user-account.
 	UserLookupAttempts int
@@ -74,6 +78,18 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// mTLS proves only that the caller holds a certificate this CA signed, never which
+	// holder it is, so the identity check happens here. Logged either way: without it
+	// an incident review can establish only that someone with a CA-signed certificate
+	// asked for a code.
+	caller := callerIdentity(r)
+	if !callerAllowed(r, h.cfg.AllowedClientNames) {
+		log.Info("Rejected a client certificate that is not on the allowlist", "caller", caller)
+		http.Error(w, "client certificate is not allowed", http.StatusForbidden)
+		return
+	}
+	log.Info("Handling mail request", "caller", caller)
+
 	var req emailVerificationRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -87,7 +103,7 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	// Parsed once here and reused for the action URL, so the value the allowlist
 	// approved is the value we build the link from.
 	returnTo, err := url.Parse(req.ReturnTo)
-	if err != nil || returnTo.Scheme == "" || returnTo.Host == "" || !h.originAllowed(returnTo) {
+	if err != nil || !returnToUsable(returnTo) || !originAllowed(returnTo, h.cfg.AllowedOrigins) {
 		// Deliberately does not echo the value: this is the phishing guard, and the
 		// rejected origin is attacker-controlled input.
 		log.Info("Rejected returnTo outside the allowlist", "userId", req.UserID)
@@ -95,7 +111,7 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	user, err := h.userWithRetry(r.Context(), req.UserID)
+	user, err := userWithRetry(r.Context(), h.client, req.UserID, h.cfg.UserLookupAttempts, h.cfg.UserLookupBaseWait)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("No User for verification mail", "userId", req.UserID)
@@ -134,11 +150,33 @@ func (h *EmailVerificationHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	_, _ = w.Write([]byte("ok"))
 }
 
+// returnToUsable rejects a returnTo that cannot safely become a mailed link, before
+// the allowlist is consulted at all.
+//
+// The userinfo check is the non-obvious one. url.Parse splits userinfo out of the
+// host, so a scheme+host comparison admits "https://evil.com@auth.example.net": the
+// connection still goes to the allowlisted host, so this is not a redirect primitive,
+// but the link renders as evil.com to the reader and mail clients, link scanners and
+// URL preview services do not all agree on userinfo handling — one that mis-parses
+// could route somewhere Go did not. There is no legitimate userinfo in a returnTo.
+//
+// Deliberately not a blanket scheme == "https" check: the allowlist already pins the
+// scheme per entry, and http://localhost:3000 is a documented dev origin.
+//
+// Package-level and shared by every handler that mails a link: this control exists
+// once, or a fix to one copy leaves the other exploitable.
+func returnToUsable(u *url.URL) bool {
+	return u.Scheme != "" && u.Host != "" && u.User == nil
+}
+
 // originAllowed is the phishing guard: without it a compromised auth-ui could have
 // us mail a real, working code pointing at any domain. Compares scheme+host rather
 // than a prefix, which would admit "https://auth.example.test.evil.com".
-func (h *EmailVerificationHandler) originAllowed(u *url.URL) bool {
-	for _, allowed := range h.cfg.AllowedOrigins {
+//
+// Package-level and shared by every handler that mails a link: this control exists
+// once, or a fix to one copy leaves the other exploitable.
+func originAllowed(u *url.URL, allowedOrigins []string) bool {
+	for _, allowed := range allowedOrigins {
 		a, err := url.Parse(allowed)
 		if err != nil {
 			continue
@@ -157,12 +195,17 @@ func (h *EmailVerificationHandler) originAllowed(u *url.URL) bool {
 // behind the request.
 //
 // Backoff is linear rather than exponential: a caller is blocked on this response.
-func (h *EmailVerificationHandler) userWithRetry(ctx context.Context, id string) (*iamv1alpha1.User, error) {
-	attempts := h.cfg.UserLookupAttempts
+// Package-level and shared: both mail endpoints race the same provisioning path.
+func userWithRetry(
+	ctx context.Context,
+	c client.Client,
+	id string,
+	attempts int,
+	baseWait time.Duration,
+) (*iamv1alpha1.User, error) {
 	if attempts < 1 {
 		attempts = 1
 	}
-	baseWait := h.cfg.UserLookupBaseWait
 	if baseWait < 0 {
 		baseWait = 0
 	}
@@ -170,7 +213,7 @@ func (h *EmailVerificationHandler) userWithRetry(ctx context.Context, id string)
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
 		user := &iamv1alpha1.User{}
-		err := h.client.Get(ctx, client.ObjectKey{Name: id}, user)
+		err := c.Get(ctx, client.ObjectKey{Name: id}, user)
 		if err == nil {
 			return user, nil
 		}
