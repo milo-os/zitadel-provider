@@ -458,4 +458,5 @@ tasks:
         vars:
           NAME: zitadel-tools
           PACKAGE: github.com/zitadel/zitadel-tools
-          VERSION: latest
+          # Pinned: v1.0.0 requires a newer Go than this module targets.
+          VERSION: v0.5.0
