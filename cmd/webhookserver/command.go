@@ -20,7 +20,6 @@ import (
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	webhook "go.miloapis.com/auth-provider-zitadel/internal/webhook"
 	token "go.miloapis.com/auth-provider-zitadel/pkg/token"
-	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
 
 // NewAuthenticationWebhookServerCommand returns a cobra command that starts the UserDeactivation
@@ -204,12 +203,6 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		return fmt.Errorf("failed to create manager: %w", err)
 	}
 
-	log.Info("Setting up webhook server")
-	hookServer := mgr.GetWebhookServer()
-
-	webhookv1 := webhook.NewAuthenticationWebhookV1(introspector)
-	hookServer.Register(webhookv1.Endpoint, webhookv1)
-
 	// Uncached client, shared by both mail endpoints: each reads a single User per
 	// request. The manager's cached client would start an informer over every User
 	// for no benefit. Built only when at least one endpoint is configured.
@@ -221,68 +214,17 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		}
 	}
 
-	if cfg.EmailVerificationTemplate != "" {
-		verify := webhook.NewEmailVerificationHandler(directClient, webhook.EmailVerificationConfig{
-			TemplateName:          cfg.EmailVerificationTemplate,
-			NotificationNamespace: cfg.NotificationNamespace,
-			AllowedOrigins:        cfg.EmailVerificationAllowedOrigins,
-			AllowedClientNames:    allowedClients,
-			ExpiryMinutes:         cfg.EmailVerificationExpiryMinutes,
-			UserLookupAttempts:    cfg.EmailVerificationUserLookupAttempts,
-			UserLookupBaseWait:    cfg.EmailVerificationUserLookupBaseWait,
-		})
-		hookServer.Register(verify.Endpoint, verify)
-		log.Info("Registered email verification endpoint",
-			"endpoint", verify.Endpoint,
-			"allowedOrigins", cfg.EmailVerificationAllowedOrigins,
-			"allowedClientNames", allowedClients)
-	} else {
-		log.Info("Email verification endpoint disabled; no template configured")
-	}
+	log.Info("Setting up webhook server")
+	hookServer := mgr.GetWebhookServer()
 
-	if cfg.AccountRecoveryTemplate != "" {
-		// The recovery endpoint mints the code itself rather than relaying one the
-		// caller supplied, so it needs a Zitadel client. That client authenticates as
-		// a service USER, which is a different credential from the application key the
-		// introspector above loads — hence the second flag. NewSDK strips the scheme
-		// off Domain.
-		if cfg.ZitadelServiceAccountKey == "" {
-			return fmt.Errorf("--zitadel-service-account-key is required when --account-recovery-template is set: " +
-				"the recovery endpoint calls the Zitadel API as a service user, which --zitadel-private-key " +
-				"(the application key used for introspection) cannot do")
-		}
-		if err := validateServiceAccountKey(cfg.ZitadelServiceAccountKey); err != nil {
-			return err
-		}
-		zc, err := zitadel.NewSDK(cmd.Context(), zitadel.SDKConfig{
-			Domain:  cfg.ZitadelDomain,
-			Issuer:  cfg.ZitadelDomain,
-			KeyPath: cfg.ZitadelServiceAccountKey,
-		})
-		if err != nil {
-			return fmt.Errorf("init zitadel sdk for account recovery: %w", err)
-		}
-
-		recovery := webhook.NewAccountRecoveryHandler(directClient, zc, webhook.AccountRecoveryConfig{
-			TemplateName:          cfg.AccountRecoveryTemplate,
-			NotificationNamespace: cfg.NotificationNamespace,
-			AllowedOrigins:        cfg.AccountRecoveryAllowedOrigins,
-			AllowedClientNames:    allowedClients,
-			ExpiryMinutes:         cfg.AccountRecoveryExpiryMinutes,
-			Cooldown:              cfg.AccountRecoveryCooldown,
-			MaxPerHour:            cfg.AccountRecoveryMaxPerHour,
-			// Shared with verification: both race the same provisioning path.
-			UserLookupAttempts: cfg.EmailVerificationUserLookupAttempts,
-			UserLookupBaseWait: cfg.EmailVerificationUserLookupBaseWait,
-		})
-		hookServer.Register(recovery.Endpoint, recovery)
-		log.Info("Registered account recovery endpoint",
-			"endpoint", recovery.Endpoint,
-			"allowedOrigins", cfg.AccountRecoveryAllowedOrigins,
-			"allowedClientNames", allowedClients)
-	} else {
-		log.Info("Account recovery endpoint disabled; no template configured")
-	}
+	// Endpoint wiring cannot fail: a misconfigured mail endpoint disables itself and
+	// logs, rather than stopping the process that answers TokenReview for the cluster.
+	registerEndpoints(cmd.Context(), hookServer, log, cfg, webhookDeps{
+		introspector:   introspector,
+		directClient:   directClient,
+		allowedClients: allowedClients,
+		newMinter:      newRecoveryMinter,
+	})
 
 	log.Info("Starting manager")
 	return mgr.Start(cmd.Context())
