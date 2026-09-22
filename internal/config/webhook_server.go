@@ -4,15 +4,27 @@ import "time"
 
 // WebhookServerConfig holds the configuration for the webhook server.
 type WebhookServerConfig struct {
-	CertDir            string
-	CertFile           string
-	KeyFile            string
-	WebhookPort        int
-	ZitadelPrivateKey  string
-	ZitadelDomain      string
-	JwtExpiration      time.Duration
-	JwtRefreshBefore   time.Duration
-	MetricsBindAddress string
+	CertDir     string
+	CertFile    string
+	KeyFile     string
+	WebhookPort int
+	// ZitadelPrivateKey is the Zitadel APPLICATION key used for token
+	// introspection. It carries clientId/appId and no userId.
+	ZitadelPrivateKey string
+	// ZitadelServiceAccountKey is the Zitadel SERVICE ACCOUNT (service user) key
+	// used to CALL the Zitadel API — today only by the account-recovery endpoint,
+	// which mints a passkey registration code.
+	//
+	// It is a second, distinct credential rather than a reuse of
+	// ZitadelPrivateKey. The SDK builds a JWT-profile assertion, which is minted
+	// for a service USER and needs that key's userId; an application key has none,
+	// and Zitadel rejects the exchange with an opaque "Errors.Internal". One key
+	// cannot serve both callers.
+	ZitadelServiceAccountKey string
+	ZitadelDomain            string
+	JwtExpiration            time.Duration
+	JwtRefreshBefore         time.Duration
+	MetricsBindAddress       string
 
 	// EmailVerificationTemplate is the EmailTemplate resource used for signup
 	// verification mail. Empty disables the endpoint entirely — the route is not

@@ -42,8 +42,17 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	cmd.Flags().StringVar(&cfg.CertFile, "cert-file", "", "Filename in the directory that contains the TLS cert")
 	cmd.Flags().StringVar(&cfg.KeyFile, "key-file", "", "Filename in the directory that contains the TLS private key")
 
-	// Zitadel introspection flags.
-	cmd.Flags().StringVar(&cfg.ZitadelPrivateKey, "zitadel-private-key", "private-key.json", "path to Zitadel private key JSON")
+	// Zitadel credential flags. These are TWO DIFFERENT KEYS for two different
+	// callers, and pointing one at the other's secret does not work — see
+	// validateServiceAccountKey.
+	cmd.Flags().StringVar(&cfg.ZitadelPrivateKey, "zitadel-private-key", "private-key.json",
+		"path to the Zitadel APPLICATION key JSON used for token introspection "+
+			"(carries clientId/appId; NOT the service account key)")
+	cmd.Flags().StringVar(&cfg.ZitadelServiceAccountKey, "zitadel-service-account-key", "",
+		"path to the Zitadel SERVICE ACCOUNT (service user) key JSON used to call the Zitadel API "+
+			"(carries userId; required by --account-recovery-template, which mints a passkey "+
+			"registration code). This is NOT --zitadel-private-key: an application key cannot mint "+
+			"a service-user JWT. Empty disables account recovery rather than failing startup")
 	cmd.Flags().StringVar(&cfg.ZitadelDomain, "zitadel-domain", "https://your_domain", "base URL of the Auth Provider instance (e.g., https://auth.example.com)")
 	cmd.Flags().DurationVar(&cfg.JwtExpiration, "jwt-expiration", time.Hour, "JWT token expiration duration (e.g., 1h, 30m, 2h30m)")
 	cmd.Flags().DurationVar(&cfg.JwtRefreshBefore, "jwt-refresh-before", 5*time.Minute, "Leeway before JWT expiry to consider cache invalid and force refresh (e.g., 5m)")
@@ -233,12 +242,22 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 
 	if cfg.AccountRecoveryTemplate != "" {
 		// The recovery endpoint mints the code itself rather than relaying one the
-		// caller supplied, so it needs a Zitadel client. Same machine-account key the
-		// introspector above already uses; NewSDK strips the scheme off Domain.
+		// caller supplied, so it needs a Zitadel client. That client authenticates as
+		// a service USER, which is a different credential from the application key the
+		// introspector above loads — hence the second flag. NewSDK strips the scheme
+		// off Domain.
+		if cfg.ZitadelServiceAccountKey == "" {
+			return fmt.Errorf("--zitadel-service-account-key is required when --account-recovery-template is set: " +
+				"the recovery endpoint calls the Zitadel API as a service user, which --zitadel-private-key " +
+				"(the application key used for introspection) cannot do")
+		}
+		if err := validateServiceAccountKey(cfg.ZitadelServiceAccountKey); err != nil {
+			return err
+		}
 		zc, err := zitadel.NewSDK(cmd.Context(), zitadel.SDKConfig{
 			Domain:  cfg.ZitadelDomain,
 			Issuer:  cfg.ZitadelDomain,
-			KeyPath: cfg.ZitadelPrivateKey,
+			KeyPath: cfg.ZitadelServiceAccountKey,
 		})
 		if err != nil {
 			return fmt.Errorf("init zitadel sdk for account recovery: %w", err)
