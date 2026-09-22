@@ -6,22 +6,14 @@ import (
 	"os"
 )
 
-// Zitadel's two key types. A key file declares which one it is in its "type" field,
-// and the two are NOT interchangeable:
-//
-//   - serviceAccountKeyType carries a userId and authenticates a service USER. It is
-//     what profile.NewJWTProfileTokenSourceFromKeyFile — and therefore zitadel.NewSDK,
-//     and therefore the recovery client — needs in order to mint an assertion.
-//   - applicationKeyType carries clientId/appId and no userId. It identifies an
-//     application, and is what the token introspector loads.
+// Zitadel key file types. Only a service account key carries the userId that the
+// SDK's JWT-profile assertion needs; an application key carries clientId/appId.
 const (
 	serviceAccountKeyType = "serviceaccount"
 	applicationKeyType    = "application"
 )
 
-// zitadelKey is the shape half of a Zitadel key file. The PEM in "key" is
-// deliberately not decoded here: this check exists to tell the two key TYPES apart
-// before any credential is used, and the private key itself has no bearing on that.
+// zitadelKey is the identifying part of a Zitadel key file; the PEM is not decoded.
 type zitadelKey struct {
 	Type     string `json:"type"`
 	UserID   string `json:"userId"`
@@ -30,15 +22,8 @@ type zitadelKey struct {
 	KeyID    string `json:"keyId"`
 }
 
-// validateServiceAccountKey confirms the file at path is a Zitadel SERVICE ACCOUNT
-// key before it is handed to zitadel.NewSDK.
-//
-// Without this check, an application key reaches the token exchange and Zitadel
-// answers HTTP 500 {"error":"server_error","error_description":"Errors.Internal"} —
-// a message that names neither the key, the flag, nor the mistake. That is how a
-// mail feature took the TokenReview webhook down for ~9.5 minutes on 2026-09-22:
-// the webhook is mounted the introspection secret, and the recovery client was
-// pointed at it on the assumption that one key served both callers.
+// validateServiceAccountKey confirms path holds a Zitadel service account key. Zitadel
+// answers an application key with an opaque "Errors.Internal", so it is caught here.
 func validateServiceAccountKey(path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -52,9 +37,6 @@ func validateServiceAccountKey(path string) error {
 			"(expected a Zitadel service account key file, not a bare PEM)", path, err)
 	}
 
-	// The incident case, and the one worth spelling out in full: the operator mounted
-	// the introspection secret here. Say so, name both secrets and both flags, and
-	// quote the error Zitadel would otherwise have returned instead.
 	if key.Type == applicationKeyType || (key.UserID == "" && (key.ClientID != "" || key.AppID != "")) {
 		return fmt.Errorf("--zitadel-service-account-key: %s is a Zitadel APPLICATION key "+
 			"(type %q, clientId %q, appId %q) and carries no userId, so it cannot mint the "+

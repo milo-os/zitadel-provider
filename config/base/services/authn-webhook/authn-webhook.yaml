@@ -61,19 +61,11 @@ spec:
               value: tls.key
             - name: ZITADEL_DOMAIN
               value: https://auth.datum.net
-            # The APPLICATION key, used for token introspection. It carries
-            # clientId/appId and no userId.
+            # Application key, for token introspection.
             - name: ZITADEL_PRIVATE_KEY_FILE_PATH
               value: /etc/zitadel/auth/machine-account-key.json
-            # The SERVICE ACCOUNT key, used to CALL the Zitadel API — today only by
-            # the account-recovery endpoint, which mints a passkey registration code.
-            # A DIFFERENT credential from the one above: the SDK mints a JWT-profile
-            # assertion for a service user, which needs this key's userId. Empty
-            # leaves recovery unregistered; setting ACCOUNT_RECOVERY_TEMPLATE without
-            # it logs an error and disables recovery rather than stopping the server.
-            #
-            # An overlay that sets this must also mount the secret holding the key;
-            # the base mounts nothing.
+            # Service account key, for account recovery; a different credential from
+            # the one above. An overlay that sets it must also mount the secret.
             - name: ZITADEL_SERVICE_ACCOUNT_KEY_PATH
               value: ""
             - name: JWT_EXPIRATION

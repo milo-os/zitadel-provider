@@ -15,9 +15,7 @@ import (
 	webhook "go.miloapis.com/auth-provider-zitadel/internal/webhook"
 )
 
-// recordingRegistrar stands in for controller-runtime's webhook server. Endpoint
-// registration is the only thing runWebhookServer does with it, so a test can watch
-// exactly which routes a configuration produces without a cluster.
+// recordingRegistrar stands in for controller-runtime's webhook server.
 type recordingRegistrar struct {
 	paths []string
 }
@@ -35,9 +33,7 @@ func (r *recordingRegistrar) has(path string) bool {
 	return false
 }
 
-// capturingSink records what registerEndpoints logged. A disabled recovery endpoint
-// is only safe if an operator can find out why from the logs, so the message is part
-// of the behaviour under test, not incidental output.
+// capturingSink records what registerEndpoints logged.
 type capturingSink struct {
 	mu    sync.Mutex
 	lines []string
@@ -67,16 +63,12 @@ func (s *capturingSink) text() string {
 	return strings.Join(s.lines, "\n")
 }
 
-// stubMinter is the Zitadel client the recovery endpoint would mint codes with. It
-// is never called here: these tests are about whether the endpoint gets registered.
 type stubMinter struct{}
 
 func (stubMinter) CreatePasskeyRegistrationLink(context.Context, string) (string, string, error) {
 	return "", "", errors.New("not called in these tests")
 }
 
-// recoveryConfig is a configuration with recovery and verification both switched on,
-// which is the shape the incident happened in.
 func recoveryConfig(t *testing.T, serviceAccountKey string) *config.WebhookServerConfig {
 	t.Helper()
 	cfg := config.NewWebhookServerConfig()
@@ -97,21 +89,14 @@ func runRegister(t *testing.T, cfg *config.WebhookServerConfig, deps webhookDeps
 	return reg, sink.text()
 }
 
-// realDeps uses the production minter builder. The failure paths below all refuse
-// before the SDK would dial anything, so exercising them this way tests the real
-// wiring rather than a test double of it.
+// realDeps uses the production minter builder; the failure paths refuse before dialing.
 func realDeps() webhookDeps {
 	return webhookDeps{newMinter: newRecoveryMinter}
 }
 
-// The rule this whole change exists to enforce: nothing about account recovery may
-// stop the webhook from serving TokenReview. Every way the recovery client can fail
-// to be built must leave the process up with the other two endpoints registered.
 func TestRegisterEndpoints_RecoveryFailuresNeverStopTheServer(t *testing.T) {
 	for name, tc := range map[string]struct {
-		deps func(t *testing.T) (webhookDeps, string) // deps, service-account key path
-		// wantLogContains is the operator-facing diagnosis. Each failure has to
-		// name the flag, not just complain.
+		deps            func(t *testing.T) (webhookDeps, string) // deps, service-account key path
 		wantLogContains []string
 	}{
 		"no service account key configured at all": {
@@ -171,14 +156,12 @@ func TestRegisterEndpoints_RecoveryFailuresNeverStopTheServer(t *testing.T) {
 
 			reg, logged := runRegister(t, cfg, deps)
 
-			// The whole point: the server is still serving.
 			if !reg.has(tokenReviewEndpoint) {
 				t.Errorf("TokenReview endpoint must stay registered, got routes: %v", reg.paths)
 			}
 			if !reg.has(webhook.EmailVerificationEndpoint) {
 				t.Errorf("email verification endpoint must stay registered, got routes: %v", reg.paths)
 			}
-			// And the broken endpoint is simply absent.
 			if reg.has(webhook.AccountRecoveryEndpoint) {
 				t.Errorf("recovery endpoint must NOT be registered when its client could not be built, got routes: %v", reg.paths)
 			}
@@ -191,8 +174,6 @@ func TestRegisterEndpoints_RecoveryFailuresNeverStopTheServer(t *testing.T) {
 	}
 }
 
-// The happy path still has to work: a real service account key registers recovery
-// alongside everything else.
 func TestRegisterEndpoints_ValidServiceAccountKeyRegistersRecovery(t *testing.T) {
 	cfg := recoveryConfig(t, writeKey(t, "service-account-key.json", fixtureServiceAccountKey))
 	deps := webhookDeps{
@@ -214,8 +195,6 @@ func TestRegisterEndpoints_ValidServiceAccountKeyRegistersRecovery(t *testing.T)
 	}
 }
 
-// An unconfigured recovery endpoint is not a failure and must not be logged as one:
-// an empty template is how every deployment that does not want recovery is spelled.
 func TestRegisterEndpoints_NoTemplateIsNotAnError(t *testing.T) {
 	cfg := recoveryConfig(t, "")
 	cfg.AccountRecoveryTemplate = ""
@@ -233,8 +212,6 @@ func TestRegisterEndpoints_NoTemplateIsNotAnError(t *testing.T) {
 	}
 }
 
-// The service account key is only consulted when recovery is switched on. A cluster
-// that does not use recovery must not be made to mount a key it has no use for.
 func TestRegisterEndpoints_ServiceAccountKeyIrrelevantWithoutRecovery(t *testing.T) {
 	cfg := recoveryConfig(t, writeKey(t, "machine-account-key.json", fixtureApplicationKey))
 	cfg.AccountRecoveryTemplate = ""
@@ -246,9 +223,7 @@ func TestRegisterEndpoints_ServiceAccountKeyIrrelevantWithoutRecovery(t *testing
 	}
 }
 
-// tokenReviewEndpoint is spelled out in this package so the tests above can assert
-// the route the cluster depends on is still there. The handler owns the real value,
-// so pin the two together rather than let them drift apart silently.
+// tokenReviewEndpoint duplicates the handler's value; keep the two from drifting.
 func TestTokenReviewEndpointMatchesTheHandler(t *testing.T) {
 	if got := webhook.NewAuthenticationWebhookV1(nil).Endpoint; got != tokenReviewEndpoint {
 		t.Fatalf("tokenReviewEndpoint is %q but the handler registers %q", tokenReviewEndpoint, got)

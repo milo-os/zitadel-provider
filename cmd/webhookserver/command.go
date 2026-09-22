@@ -41,9 +41,7 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	cmd.Flags().StringVar(&cfg.CertFile, "cert-file", "", "Filename in the directory that contains the TLS cert")
 	cmd.Flags().StringVar(&cfg.KeyFile, "key-file", "", "Filename in the directory that contains the TLS private key")
 
-	// Zitadel credential flags. These are TWO DIFFERENT KEYS for two different
-	// callers, and pointing one at the other's secret does not work — see
-	// validateServiceAccountKey.
+	// Zitadel credential flags: two different keys, not interchangeable.
 	cmd.Flags().StringVar(&cfg.ZitadelPrivateKey, "zitadel-private-key", "private-key.json",
 		"path to the Zitadel APPLICATION key JSON used for token introspection "+
 			"(carries clientId/appId; NOT the service account key)")
@@ -217,8 +215,6 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 	log.Info("Setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
 
-	// Endpoint wiring cannot fail: a misconfigured mail endpoint disables itself and
-	// logs, rather than stopping the process that answers TokenReview for the cluster.
 	registerEndpoints(cmd.Context(), hookServer, log, cfg, webhookDeps{
 		introspector:   introspector,
 		directClient:   directClient,

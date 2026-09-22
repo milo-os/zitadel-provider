@@ -8,18 +8,10 @@ type WebhookServerConfig struct {
 	CertFile    string
 	KeyFile     string
 	WebhookPort int
-	// ZitadelPrivateKey is the Zitadel APPLICATION key used for token
-	// introspection. It carries clientId/appId and no userId.
+	// ZitadelPrivateKey is the Zitadel application key used for token introspection.
 	ZitadelPrivateKey string
-	// ZitadelServiceAccountKey is the Zitadel SERVICE ACCOUNT (service user) key
-	// used to CALL the Zitadel API — today only by the account-recovery endpoint,
-	// which mints a passkey registration code.
-	//
-	// It is a second, distinct credential rather than a reuse of
-	// ZitadelPrivateKey. The SDK builds a JWT-profile assertion, which is minted
-	// for a service USER and needs that key's userId; an application key has none,
-	// and Zitadel rejects the exchange with an opaque "Errors.Internal". One key
-	// cannot serve both callers.
+	// ZitadelServiceAccountKey is the Zitadel service account key the recovery
+	// endpoint calls the API with. It cannot be the application key: that has no userId.
 	ZitadelServiceAccountKey string
 	ZitadelDomain            string
 	JwtExpiration            time.Duration
