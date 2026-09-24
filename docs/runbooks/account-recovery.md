@@ -68,6 +68,67 @@ answers `200 {"codeId":"..."}`.
 - The response carries the `codeId` and **never the code**. The caller asked for a mail
   to be sent, not for the credential.
 
+## The webhook's two Zitadel credentials
+
+The authn-webhook holds **two** Zitadel keys, for two different callers. They are not
+interchangeable, and Zitadel will not tell you when you have swapped them.
+
+| Flag | Key type | `type` in the JSON | Carries | Used for |
+|---|---|---|---|---|
+| `--zitadel-private-key` | Application key | `application` | `clientId`, `appId`, `keyId` | Token introspection, i.e. the TokenReview path |
+| `--zitadel-service-account-key` | Service account key | `serviceaccount` | `userId`, `keyId` | Calling the Zitadel API. Today only account recovery, which mints the registration code |
+
+The introspector reads `clientId` and `keyId` off its key and introspects tokens with
+them. The recovery client goes through `zitadel.NewSDK`, which builds a JWT-profile
+token source: that assertion is minted **for a service user**, so it needs that user's
+`userId`. An application key has none, and no flag value can conjure one.
+
+Point `--zitadel-service-account-key` at an application key and the token exchange
+answers:
+
+```
+HTTP 500 {"error":"server_error","error_description":"Errors.Internal"}
+```
+
+That message names neither the key, the flag, nor the mistake. The webhook now reads
+the key's `type` and `userId` before it calls Zitadel and refuses a mismatch itself,
+naming both secrets and both flags.
+
+The two keys live in different secrets. `iam-admin` holds a service account key, and
+the CI overlay mounts it. `zitadel-machine-auth-api-key` holds the application key, and
+that is what staging mounts for introspection. **The base bundle mounts neither** —
+`volumeMounts` and `volumes` are empty there, as they are for every other service in
+this repo. An overlay that switches recovery on has to add a volume for the service
+account key secret and point `ZITADEL_SERVICE_ACCOUNT_KEY_PATH` at the mounted file.
+
+### Recovery degrades; it does not take the webhook down
+
+This webhook's first job is answering `/apis/authentication.k8s.io/v1/tokenreviews` for
+the cluster. Recovery is a mail feature that happens to share the process, and it now
+fails on its own. If the recovery client cannot be built, the webhook logs why, leaves
+`/v1/email/recovery` unregistered, and goes on serving TokenReview and email
+verification.
+
+Four failures degrade this way: `--zitadel-service-account-key` empty while a recovery
+template is set, the key file missing or unreadable, a key file that is not a service
+account key, and `zitadel.NewSDK` returning an error. Each logs at error level and
+names the flag to fix. Correct the flag and restart to get recovery back.
+
+The line to alert on — self-serve recovery is off, everything else is healthy:
+
+```
+Account recovery endpoint disabled; its Zitadel client could not be built.
+```
+
+On 2026-09-22 none of this was true. Infra set `ACCOUNT_RECOVERY_TEMPLATE`, the
+recovery client was built from the introspection key, the error came straight back out
+of startup, and cluster authentication was down for about 9.5 minutes because of a mail
+feature that never worked in the first place.
+
+Setting either mail template without `--client-ca-file` is **still a hard startup
+failure**, and deliberately so. A mail endpoint that anyone who can reach the Service
+can call is worse than no mail endpoint.
+
 ## Flags
 
 Infra never sets container args — it sets env vars, and this repo's bundle declares each
@@ -84,6 +145,7 @@ flag as `--flag=$(ENV)`. The env names below are what an overlay patches.
 | `--account-recovery-expiry-minutes` | `ACCOUNT_RECOVERY_EXPIRY_MINUTES` | `60` | A copy of Zitadel's `PasswordlessInitCode` lifetime. If that changes and this does not, the mail starts lying. |
 | `--account-recovery-cooldown` | `ACCOUNT_RECOVERY_COOLDOWN` | `2m` | Minimum gap between recovery mails for one user. `0` disables the cooldown. |
 | `--account-recovery-max-per-hour` | `ACCOUNT_RECOVERY_MAX_PER_HOUR` | `5` | Recovery mails per user per hour. `0` disables the cap. |
+| `--zitadel-service-account-key` | `ZITADEL_SERVICE_ACCOUNT_KEY_PATH` | `""` | The Zitadel **service account** key used to mint the registration code. **Not** `--zitadel-private-key`, which is the application key for introspection. Empty, or wrong, disables recovery and logs; it does not stop the server. The base mounts no secret for it. |
 | `--mail-webhook-allowed-client-names` | `MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES` | `""` | Client certificate CNs and/or URI SANs allowed to reach **both** mail endpoints. **Empty accepts any client the CA signed** and logs a startup warning. **Set this in production.** |
 
 `--notification-namespace` and the `--email-verification-user-lookup-*` retry flags are

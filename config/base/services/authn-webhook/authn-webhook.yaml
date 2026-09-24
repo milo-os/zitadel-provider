@@ -36,6 +36,7 @@ spec:
             - --key-file=$(KEY_FILE)
             - --zitadel-domain=$(ZITADEL_DOMAIN)
             - --zitadel-private-key=$(ZITADEL_PRIVATE_KEY_FILE_PATH)
+            - --zitadel-service-account-key=$(ZITADEL_SERVICE_ACCOUNT_KEY_PATH)
             - --jwt-expiration=$(JWT_EXPIRATION)
             - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
             - --client-ca-file=$(CLIENT_CA_FILE)
@@ -60,8 +61,13 @@ spec:
               value: tls.key
             - name: ZITADEL_DOMAIN
               value: https://auth.datum.net
+            # Application key, for token introspection.
             - name: ZITADEL_PRIVATE_KEY_FILE_PATH
               value: /etc/zitadel/auth/machine-account-key.json
+            # Service account key, for account recovery; a different credential from
+            # the one above. An overlay that sets it must also mount the secret.
+            - name: ZITADEL_SERVICE_ACCOUNT_KEY_PATH
+              value: ""
             - name: JWT_EXPIRATION
               value: "1h"
             - name: METRICS_BIND_ADDRESS

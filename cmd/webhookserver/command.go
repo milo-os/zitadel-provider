@@ -20,7 +20,6 @@ import (
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	webhook "go.miloapis.com/auth-provider-zitadel/internal/webhook"
 	token "go.miloapis.com/auth-provider-zitadel/pkg/token"
-	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
 
 // NewAuthenticationWebhookServerCommand returns a cobra command that starts the UserDeactivation
@@ -42,8 +41,15 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	cmd.Flags().StringVar(&cfg.CertFile, "cert-file", "", "Filename in the directory that contains the TLS cert")
 	cmd.Flags().StringVar(&cfg.KeyFile, "key-file", "", "Filename in the directory that contains the TLS private key")
 
-	// Zitadel introspection flags.
-	cmd.Flags().StringVar(&cfg.ZitadelPrivateKey, "zitadel-private-key", "private-key.json", "path to Zitadel private key JSON")
+	// Zitadel credential flags: two different keys, not interchangeable.
+	cmd.Flags().StringVar(&cfg.ZitadelPrivateKey, "zitadel-private-key", "private-key.json",
+		"path to the Zitadel APPLICATION key JSON used for token introspection "+
+			"(carries clientId/appId; NOT the service account key)")
+	cmd.Flags().StringVar(&cfg.ZitadelServiceAccountKey, "zitadel-service-account-key", "",
+		"path to the Zitadel SERVICE ACCOUNT (service user) key JSON used to call the Zitadel API "+
+			"(carries userId; required by --account-recovery-template, which mints a passkey "+
+			"registration code). This is NOT --zitadel-private-key: an application key cannot mint "+
+			"a service-user JWT. Empty disables account recovery rather than failing startup")
 	cmd.Flags().StringVar(&cfg.ZitadelDomain, "zitadel-domain", "https://your_domain", "base URL of the Auth Provider instance (e.g., https://auth.example.com)")
 	cmd.Flags().DurationVar(&cfg.JwtExpiration, "jwt-expiration", time.Hour, "JWT token expiration duration (e.g., 1h, 30m, 2h30m)")
 	cmd.Flags().DurationVar(&cfg.JwtRefreshBefore, "jwt-refresh-before", 5*time.Minute, "Leeway before JWT expiry to consider cache invalid and force refresh (e.g., 5m)")
@@ -195,12 +201,6 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		return fmt.Errorf("failed to create manager: %w", err)
 	}
 
-	log.Info("Setting up webhook server")
-	hookServer := mgr.GetWebhookServer()
-
-	webhookv1 := webhook.NewAuthenticationWebhookV1(introspector)
-	hookServer.Register(webhookv1.Endpoint, webhookv1)
-
 	// Uncached client, shared by both mail endpoints: each reads a single User per
 	// request. The manager's cached client would start an informer over every User
 	// for no benefit. Built only when at least one endpoint is configured.
@@ -212,58 +212,15 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		}
 	}
 
-	if cfg.EmailVerificationTemplate != "" {
-		verify := webhook.NewEmailVerificationHandler(directClient, webhook.EmailVerificationConfig{
-			TemplateName:          cfg.EmailVerificationTemplate,
-			NotificationNamespace: cfg.NotificationNamespace,
-			AllowedOrigins:        cfg.EmailVerificationAllowedOrigins,
-			AllowedClientNames:    allowedClients,
-			ExpiryMinutes:         cfg.EmailVerificationExpiryMinutes,
-			UserLookupAttempts:    cfg.EmailVerificationUserLookupAttempts,
-			UserLookupBaseWait:    cfg.EmailVerificationUserLookupBaseWait,
-		})
-		hookServer.Register(verify.Endpoint, verify)
-		log.Info("Registered email verification endpoint",
-			"endpoint", verify.Endpoint,
-			"allowedOrigins", cfg.EmailVerificationAllowedOrigins,
-			"allowedClientNames", allowedClients)
-	} else {
-		log.Info("Email verification endpoint disabled; no template configured")
-	}
+	log.Info("Setting up webhook server")
+	hookServer := mgr.GetWebhookServer()
 
-	if cfg.AccountRecoveryTemplate != "" {
-		// The recovery endpoint mints the code itself rather than relaying one the
-		// caller supplied, so it needs a Zitadel client. Same machine-account key the
-		// introspector above already uses; NewSDK strips the scheme off Domain.
-		zc, err := zitadel.NewSDK(cmd.Context(), zitadel.SDKConfig{
-			Domain:  cfg.ZitadelDomain,
-			Issuer:  cfg.ZitadelDomain,
-			KeyPath: cfg.ZitadelPrivateKey,
-		})
-		if err != nil {
-			return fmt.Errorf("init zitadel sdk for account recovery: %w", err)
-		}
-
-		recovery := webhook.NewAccountRecoveryHandler(directClient, zc, webhook.AccountRecoveryConfig{
-			TemplateName:          cfg.AccountRecoveryTemplate,
-			NotificationNamespace: cfg.NotificationNamespace,
-			AllowedOrigins:        cfg.AccountRecoveryAllowedOrigins,
-			AllowedClientNames:    allowedClients,
-			ExpiryMinutes:         cfg.AccountRecoveryExpiryMinutes,
-			Cooldown:              cfg.AccountRecoveryCooldown,
-			MaxPerHour:            cfg.AccountRecoveryMaxPerHour,
-			// Shared with verification: both race the same provisioning path.
-			UserLookupAttempts: cfg.EmailVerificationUserLookupAttempts,
-			UserLookupBaseWait: cfg.EmailVerificationUserLookupBaseWait,
-		})
-		hookServer.Register(recovery.Endpoint, recovery)
-		log.Info("Registered account recovery endpoint",
-			"endpoint", recovery.Endpoint,
-			"allowedOrigins", cfg.AccountRecoveryAllowedOrigins,
-			"allowedClientNames", allowedClients)
-	} else {
-		log.Info("Account recovery endpoint disabled; no template configured")
-	}
+	registerEndpoints(cmd.Context(), hookServer, log, cfg, webhookDeps{
+		introspector:   introspector,
+		directClient:   directClient,
+		allowedClients: allowedClients,
+		newMinter:      newRecoveryMinter,
+	})
 
 	log.Info("Starting manager")
 	return mgr.Start(cmd.Context())
