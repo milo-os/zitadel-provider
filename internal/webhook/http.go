@@ -53,10 +53,19 @@ func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	reviewResponse := wh.Handler.Handle(r.Context(), Request{TokenReview: review})
 
-	log.Info("Request processed",
+	// On a denial the username and uid are empty by construction, so without
+	// the evaluation error this line records only that *something* was refused.
+	// The reason is already on the response; it just was not being logged.
+	kv := []any{
 		"authenticated", reviewResponse.Status.Authenticated,
 		"username", reviewResponse.Status.User.Username,
-		"uid", reviewResponse.Status.User.UID)
+		"uid", reviewResponse.Status.User.UID,
+	}
+	if !reviewResponse.Status.Authenticated && reviewResponse.Status.Error != "" {
+		kv = append(kv, "reason", reviewResponse.Status.Error)
+	}
+
+	log.Info("Request processed", kv...)
 
 	wh.writeResponse(w, reviewResponse)
 }
