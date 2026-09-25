@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -295,6 +294,10 @@ func (s *Server) createUserAccountHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if s.applyPendingAvatarByEmail(r.Context(), log, req.AggregateID, req.EventPayload.Email, "create-user-account") {
+		log.Info("Applied pending avatar from idp intent", "userName", req.AggregateID, "email", req.EventPayload.Email)
+	}
+
 	log.Info("Successfully created user resource",
 		"userName", req.UserID,
 		"email", req.EventPayload.Email,
@@ -477,8 +480,8 @@ func (s *Server) idpIntentSucceededHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Decode idpUser JSON
-	raw, err := base64.StdEncoding.DecodeString(req.EventPayload.IDPUser)
+	// Decode idpUser JSON (base64-wrapped bytes or raw JSON, depending on Zitadel version).
+	raw, err := decodeIDPUserPayload(req.EventPayload.IDPUser)
 	if err != nil {
 		log.Error(err, "Failed to decode idpUser")
 		http.Error(w, "invalid idpUser", http.StatusBadRequest)
@@ -495,6 +498,14 @@ func (s *Server) idpIntentSucceededHandler(w http.ResponseWriter, r *http.Reques
 
 	userID := miloUserIDFromIdpIntent(req)
 	if userID == "" {
+		email := extractEmailFromIDPUserData(raw)
+		if email != "" {
+			storePendingAvatar(email, avatarURL, idpProvider)
+			log.Info("Stored pending avatar for new signup", "email", email, "idpProvider", idpProvider, "avatarURL", avatarURL)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("pending"))
+			return
+		}
 		log.Error(nil, "User ID not found in idpintent.succeeded payload")
 		http.Error(w, "userID not found in payload", http.StatusBadRequest)
 		return
@@ -505,6 +516,14 @@ func (s *Server) idpIntentSucceededHandler(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		log.Error(err, "Failed to get User resource", "userId", userID)
 		if apierrors.IsNotFound(err) {
+			email := extractEmailFromIDPUserData(raw)
+			if email != "" {
+				storePendingAvatar(email, avatarURL, idpProvider)
+				log.Info("Stored pending avatar after user lookup miss", "email", email, "userId", userID)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("pending"))
+				return
+			}
 			http.Error(w, "user not found", http.StatusNotFound)
 			return
 		}
@@ -529,10 +548,7 @@ func (s *Server) idpIntentSucceededHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func miloUserIDFromIdpIntent(req IdpIntentSucceededRequest) string {
-	if id := req.EventPayload.UserID; id != "" {
-		return id
-	}
-	return req.UserID
+	return req.EventPayload.UserID
 }
 
 func (s *Server) getUserWithRetry(ctx context.Context, userID string) (*iammiloapiscomv1alpha1.User, error) {

@@ -1028,8 +1028,8 @@ func TestMiloUserIDFromIdpIntent(t *testing.T) {
 	}
 
 	req = IdpIntentSucceededRequest{UserID: "top-level-id"}
-	if got := miloUserIDFromIdpIntent(req); got != "top-level-id" {
-		t.Fatalf("got %q, want top-level-id", got)
+	if got := miloUserIDFromIdpIntent(req); got != "" {
+		t.Fatalf("got %q, want empty (top-level userID is the event creator)", got)
 	}
 }
 
