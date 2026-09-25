@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -37,6 +38,8 @@ import (
 const (
 	ZitadelReadyCondition = "ZitadelReady"
 	fieldOwnerName        = "auth-provider-zitadel"
+	userStateWaitReason   = "WaitingForUserState"
+	userStateRequeueAfter = 30 * time.Second
 )
 
 type PlatformAccessController struct {
@@ -65,19 +68,22 @@ func (r *PlatformAccessController) Reconcile(ctx context.Context, req reconcile.
 	}
 
 	var reconcileErr error
+	var waitingForUserState bool
 	// Only sync to Zitadel if the platform access state actually changed
 	if r.stateChanged(platformAccess) {
 		expectActive := r.expectActive(platformAccess.Spec.State)
 		log.Info("Aligning Zitadel user state", "userName", userName, "state", platformAccess.Spec.State, "expectActive", expectActive)
 
-		if err := r.ensureZitadelUserState(ctx, userName, expectActive); err != nil {
+		var err error
+		waitingForUserState, err = r.ensureZitadelUserState(ctx, userName, expectActive)
+		if err != nil {
 			log.Error(err, "Failed to align Zitadel user state", "userName", userName)
 			reconcileErr = err
 		}
 	}
 
 	oldPlatformAccess := platformAccess.DeepCopy()
-	r.updateStatusConditions(&platformAccess.Status, platformAccess.Spec.State, reconcileErr)
+	r.updateStatusConditions(&platformAccess.Status, platformAccess.Spec.State, reconcileErr, waitingForUserState)
 
 	if r.shouldUpdateStatus(&oldPlatformAccess.Status, &platformAccess.Status) {
 		patch := client.MergeFrom(oldPlatformAccess)
@@ -89,6 +95,11 @@ func (r *PlatformAccessController) Reconcile(ctx context.Context, req reconcile.
 
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
+	}
+
+	if waitingForUserState {
+		log.Info("Zitadel user is not yet in a state that allows syncing; requeuing", "userName", userName, "requeueAfter", userStateRequeueAfter)
+		return ctrl.Result{RequeueAfter: userStateRequeueAfter}, nil
 	}
 
 	log.Info("Reconciliation completed", "userName", userName)
@@ -117,37 +128,57 @@ func (r *PlatformAccessController) stateChanged(platformAccess *iammiloapiscomv1
 	return cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != string(platformAccess.Spec.State)
 }
 
-func (r *PlatformAccessController) ensureZitadelUserState(ctx context.Context, userName string, expectActive bool) error {
+// ensureZitadelUserState aligns the Zitadel user's active/inactive state with expectActive.
+// It returns waitingForUserState=true when the user is currently in a state (e.g. still
+// initial, or locked) from which Zitadel won't accept a reactivate/deactivate call, so the
+// caller can requeue and retry once that state has a chance to change.
+func (r *PlatformAccessController) ensureZitadelUserState(ctx context.Context, userName string, expectActive bool) (waitingForUserState bool, err error) {
 	userResp, err := r.Zitadel.GetUser(ctx, userName)
 	if err != nil {
-		return fmt.Errorf("failed to get user state from Zitadel: %w", err)
+		return false, fmt.Errorf("failed to get user state from Zitadel: %w", err)
 	}
 
 	currentState := userResp.User.State
 	if expectActive && currentState == zitadel.UserStateActive {
-		return nil
+		return false, nil
 	}
 	if !expectActive && currentState == zitadel.UserStateInactive {
-		return nil
+		return false, nil
 	}
+
+	log := logf.FromContext(ctx)
 
 	if expectActive {
-		return r.Zitadel.ReactivateUser(ctx, userName)
+		if currentState != zitadel.UserStateInactive {
+			log.Info("User is not inactive yet; deferring reactivation", "userName", userName, "currentState", currentState)
+			return true, nil
+		}
+		return false, r.Zitadel.ReactivateUser(ctx, userName)
 	}
-	return r.Zitadel.DeactivateUser(ctx, userName)
+
+	if currentState != zitadel.UserStateActive {
+		log.Info("User is not active yet; deferring deactivation", "userName", userName, "currentState", currentState)
+		return true, nil
+	}
+	return false, r.Zitadel.DeactivateUser(ctx, userName)
 }
 
-func (r *PlatformAccessController) updateStatusConditions(status *iammiloapiscomv1alpha1.PlatformAccessStatus, state iammiloapiscomv1alpha1.PlatformAccessState, err error) {
+func (r *PlatformAccessController) updateStatusConditions(status *iammiloapiscomv1alpha1.PlatformAccessStatus, state iammiloapiscomv1alpha1.PlatformAccessState, err error, waitingForUserState bool) {
 	cond := metav1.Condition{
 		Type:               ZitadelReadyCondition,
 		LastTransitionTime: metav1.Now(),
 	}
 
-	if err != nil {
+	switch {
+	case err != nil:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "SyncFailed"
 		cond.Message = fmt.Sprintf("Failed to align Zitadel user state: %s", err.Error())
-	} else {
+	case waitingForUserState:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = userStateWaitReason
+		cond.Message = "Waiting for the Zitadel user to reach a state that allows syncing"
+	default:
 		cond.Status = metav1.ConditionTrue
 		cond.Reason = string(state)
 		cond.Message = fmt.Sprintf("Zitadel user state successfully aligned to %s", state)
