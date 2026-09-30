@@ -98,6 +98,12 @@ func (s *Server) sessionAddedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if zitadelUser, err := zClient.GetUserByID(r.Context(), userID); err == nil && zitadelUser != nil && zitadelUser.Email != "" {
+		if s.applyPendingAvatarByEmail(r.Context(), log, userID, zitadelUser.Email, "session-added") {
+			log.Info("Applied pending avatar during session added", "userId", userID, "email", zitadelUser.Email)
+		}
+	}
+
 	var currentIP string
 	var currentUserAgent string
 	var currentFingerprint string
