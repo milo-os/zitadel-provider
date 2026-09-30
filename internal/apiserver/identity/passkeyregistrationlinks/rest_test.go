@@ -158,7 +158,7 @@ func link() *milov1alpha1.PasskeyRegistrationLink {
 	return &milov1alpha1.PasskeyRegistrationLink{
 		Spec: milov1alpha1.PasskeyRegistrationLinkSpec{
 			UserRef:     milov1alpha1.PasskeyRegistrationLinkUserReference{Name: "user-1"},
-			RequestedBy: "staff-1",
+			RequestedBy: "staff-uid",
 			Reason:      "ticket-42: user lost their laptop",
 		},
 	}
@@ -221,17 +221,38 @@ func TestCreate_RequiredFields(t *testing.T) {
 
 // requestedBy is the audit record; a caller may not attribute a link to someone else.
 func TestCreate_RequestedByMustBeTheCaller(t *testing.T) {
-	h := newREST(t, interceptor.Funcs{}, verifiedUser())
-	l := link()
-	l.Spec.RequestedBy = "someone-else"
+	for name, tc := range map[string]struct {
+		caller      user.DefaultInfo
+		requestedBy string
+		wantReject  bool
+	}{
+		"caller UID":                {user.DefaultInfo{Name: "staff-1", UID: "staff-uid"}, "staff-uid", false},
+		"caller name while UID set": {user.DefaultInfo{Name: "staff-1", UID: "staff-uid"}, "staff-1", true},
+		"caller name with no UID":   {user.DefaultInfo{Name: "staff-1"}, "staff-1", false},
+		"someone else":              {user.DefaultInfo{Name: "staff-1", UID: "staff-uid"}, "someone-else", true},
+		"someone else with no UID":  {user.DefaultInfo{Name: "staff-1"}, "someone-else", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newREST(t, interceptor.Funcs{}, verifiedUser())
+			l := link()
+			l.Spec.RequestedBy = tc.requestedBy
+			ctx := request.WithUser(context.Background(), &tc.caller)
 
-	_, err := create(t, h, l)
+			_, err := h.rest.Create(ctx, l, nil, &metav1.CreateOptions{})
 
-	if !apierrors.IsBadRequest(err) {
-		t.Fatalf("expected 400 BadRequest, got %v", err)
-	}
-	if h.z.calls != 0 {
-		t.Error("a rejected request must not mint a code")
+			if !tc.wantReject {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+				return
+			}
+			if !apierrors.IsBadRequest(err) {
+				t.Fatalf("expected 400 BadRequest, got %v", err)
+			}
+			if h.z.calls != 0 {
+				t.Error("a rejected request must not mint a code")
+			}
+		})
 	}
 }
 

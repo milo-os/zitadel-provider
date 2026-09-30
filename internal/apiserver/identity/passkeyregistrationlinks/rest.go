@@ -151,13 +151,19 @@ func (r *REST) Create(
 		return nil, apierrors.NewUnauthorized("no user in context")
 	}
 
+	// The UID is the milo User name that requestedBy carries; Name is the email.
+	callerID := caller.GetUID()
+	if callerID == "" {
+		callerID = caller.GetName()
+	}
+
 	target := link.Spec.UserRef.Name
 	switch {
 	case target == "":
 		return nil, apierrors.NewBadRequest("spec.userRef.name is required")
 	case strings.TrimSpace(link.Spec.Reason) == "":
 		return nil, apierrors.NewBadRequest("spec.reason is required")
-	case link.Spec.RequestedBy != caller.GetName():
+	case link.Spec.RequestedBy != callerID:
 		// requestedBy is the audit record; nobody may attribute a link to someone else.
 		return nil, apierrors.NewBadRequest("spec.requestedBy must be the authenticated caller")
 	}
