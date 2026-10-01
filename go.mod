@@ -10,7 +10,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.10.2
 	github.com/zitadel/oidc/v3 v3.45.5
-	github.com/zitadel/zitadel v1.80.0-v2.20.0.20250619094244-3a4298c1794a
+	github.com/zitadel/zitadel v1.87.5
 	github.com/zitadel/zitadel-go/v3 v3.28.0
 	go.miloapis.com/milo v0.32.7-0.20260910131650-ba56271935ba
 	go.uber.org/zap v1.27.1
