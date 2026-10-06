@@ -153,18 +153,30 @@ tasks:
 
 
   ci:install-external-crds:
-    desc: Install external CRDs from Milo
+    desc: Install external CRDs from the pinned Milo module version
     silent: true
     cmds:
       - |
         set -e
-        echo "Installing external CRDs from milo repository..."
+        # Keep the API schema used by the test cluster in lockstep with the
+        # Milo Go module that the provider was compiled against. In particular,
+        # this matters for fields introduced by a Milo dependency update: using
+        # the default branch can cause Kubernetes to silently prune them.
+        go mod download go.miloapis.com/milo
+        MILO_MODULE_DIR="$(go list -m -json go.miloapis.com/milo \
+          | sed -n 's/^[[:space:]]*"Dir": "\(.*\)",$/\1/p')"
+        if [ -z "$MILO_MODULE_DIR" ]; then
+          echo "Unable to locate the pinned Milo module" >&2
+          exit 1
+        fi
+
+        echo "Installing external CRDs from $MILO_MODULE_DIR..."
         task test-infra:kubectl -- apply \
-          -k https://github.com/milo-os/milo/config/crd/bases/iam
+          -k "$MILO_MODULE_DIR/config/crd/bases/iam"
         task test-infra:kubectl -- apply \
-          -k https://github.com/milo-os/milo/config/crd/bases/infrastructure
+          -k "$MILO_MODULE_DIR/config/crd/bases/infrastructure"
         task test-infra:kubectl -- apply \
-          -k https://github.com/milo-os/milo/config/crd/bases/resourcemanager
+          -k "$MILO_MODULE_DIR/config/crd/bases/resourcemanager"
         echo "Milo CRDs installed."
 
   ci:port-forward:
