@@ -160,11 +160,12 @@ func (r *ServiceAccountController) Reconcile(ctx context.Context, req mcreconcil
 
 	if user == nil {
 		log.Info("Service account not found in Zitadel, creating it", "userID", userID, "orgID", orgID)
-		_, err := r.Zitadel.AddMachineUserInOrganization(ctx, orgID, userID, saComputedEmail, serviceAccount.GetName())
+		createdUserID, err := r.Zitadel.AddMachineUserInOrganization(ctx, orgID, userID, saComputedEmail, serviceAccount.GetName())
 		if err != nil {
 			log.Error(err, "Failed to create service account user in Zitadel", "userID", userID, "orgID", orgID)
 			return ctrl.Result{}, fmt.Errorf("add machine user in organization: %w", err)
 		}
+		user = &pkgzitadel.User{ID: createdUserID}
 		log.Info("Successfully created service account in Zitadel", "userID", userID, "orgID", orgID)
 	}
 
@@ -180,8 +181,26 @@ func (r *ServiceAccountController) Reconcile(ctx context.Context, req mcreconcil
 	}
 
 	log.Info("Updating ServiceAccount status", "serviceAccountName", serviceAccount.GetName())
+	if err := setServiceAccountReadyStatus(serviceAccount, user, saComputedEmail); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := cluster.GetClient().Status().Update(ctx, serviceAccount); err != nil {
+		log.Error(err, "Failed to update ServiceAccount status")
+		return ctrl.Result{}, fmt.Errorf("failed to update ServiceAccount status: %w", err)
+	}
+
+	log.Info("Successfully reconciled ServiceAccount")
+	return ctrl.Result{}, nil
+}
+
+func setServiceAccountReadyStatus(serviceAccount *iammiloapiscomv1alpha1.ServiceAccount, user *pkgzitadel.User, email string) error {
+	if user == nil || user.ID == "" {
+		return fmt.Errorf("authentication provider returned an empty service account client ID")
+	}
+
+	serviceAccount.Status.ClientID = user.ID
+	serviceAccount.Status.Email = email
 	serviceAccount.Status.State = serviceAccount.Spec.State
-	serviceAccount.Status.Email = saComputedEmail
 	serviceAccountCondition := metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
@@ -190,13 +209,7 @@ func (r *ServiceAccountController) Reconcile(ctx context.Context, req mcreconcil
 		LastTransitionTime: metav1.Now(),
 	}
 	meta.SetStatusCondition(&serviceAccount.Status.Conditions, serviceAccountCondition)
-	if err := cluster.GetClient().Status().Update(ctx, serviceAccount); err != nil {
-		log.Error(err, "Failed to update ServiceAccount status")
-		return ctrl.Result{}, fmt.Errorf("failed to update ServiceAccount status: %w", err)
-	}
-
-	log.Info("Successfully reconciled ServiceAccount")
-	return ctrl.Result{}, nil
+	return nil
 }
 
 func (r *ServiceAccountController) updateServiceAccountState(ctx context.Context, orgID string, serviceAccount *iammiloapiscomv1alpha1.ServiceAccount) error {

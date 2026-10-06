@@ -26,6 +26,33 @@ spec:
     - script:
         content: |
           set -e
+          # Simulate an account created before status.clientID existed. A normal
+          # metadata update must trigger reconciliation and backfill the field
+          # without recreating the service account or its Zitadel user.
+          ORIGINAL_UID=$(kubectl get serviceaccounts.iam.miloapis.com sa-generation -o jsonpath='{.metadata.uid}')
+          kubectl patch serviceaccounts.iam.miloapis.com sa-generation --subresource=status --type=json \
+            -p='[{"op":"remove","path":"/status/clientID"}]'
+          kubectl annotate serviceaccounts.iam.miloapis.com sa-generation \
+            test.miloapis.com/reconcile-client-id="$(date +%s)" --overwrite
+
+          for attempt in $(seq 1 30); do
+            STATUS_CLIENT_ID=$(kubectl get serviceaccounts.iam.miloapis.com sa-generation -o jsonpath='{.status.clientID}')
+            [ -n "$STATUS_CLIENT_ID" ] && break
+            sleep 1
+          done
+
+          if [ -z "$STATUS_CLIENT_ID" ]; then
+            echo "ERROR: Existing ServiceAccount status.clientID was not backfilled"
+            exit 1
+          fi
+          CURRENT_UID=$(kubectl get serviceaccounts.iam.miloapis.com sa-generation -o jsonpath='{.metadata.uid}')
+          if [ "$CURRENT_UID" != "$ORIGINAL_UID" ]; then
+            echo "ERROR: ServiceAccount was recreated during client ID backfill"
+            exit 1
+          fi
+    - script:
+        content: |
+          set -e
           # Compute username
           SA_UID=$(kubectl get serviceaccounts.iam.miloapis.com sa-generation -o jsonpath='{.metadata.uid}')
           SA_USERNAME="sa-generation@single.identity.miloapis.com"
@@ -78,6 +105,15 @@ spec:
               exit 1
             fi
           done
+
+          # The service account status and generated credential must expose the
+          # same authoritative authentication-provider client ID.
+          STATUS_CLIENT_ID=$(kubectl get serviceaccounts.iam.miloapis.com sa-generation -o jsonpath='{.status.clientID}')
+          CREDENTIAL_CLIENT_ID=$(jq -r '.client_id' /tmp/sa-generation-datum-credentials.json)
+          if [ -z "$STATUS_CLIENT_ID" ] || [ "$STATUS_CLIENT_ID" != "$CREDENTIAL_CLIENT_ID" ]; then
+            echo "ERROR: ServiceAccount status.clientID '$STATUS_CLIENT_ID' does not match credential client_id '$CREDENTIAL_CLIENT_ID'"
+            exit 1
+          fi
 
           # Convert the Datum credentials to Zitadel's native key-file format so
           # zitadel-tools key2jwt (which expects Zitadel's shape) can sign a
