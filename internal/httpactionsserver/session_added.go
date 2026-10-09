@@ -179,6 +179,8 @@ func isSuspiciousLogin(log logr.Logger, previousSessions []zitadel.Session, curr
 		return false
 	}
 
+	currentUserAgentKey := userAgentKey(currentUserAgent)
+
 	ipSeen := false
 	userAgentSeen := false
 	fingerprintSeen := false
@@ -187,7 +189,7 @@ func isSuspiciousLogin(log logr.Logger, previousSessions []zitadel.Session, curr
 		if sess.IP == currentIP {
 			ipSeen = true
 		}
-		if sess.UserAgent == currentUserAgent {
+		if sess.UserAgent != "" && userAgentKey(sess.UserAgent) == currentUserAgentKey {
 			userAgentSeen = true
 		}
 		if currentFingerprint != "" && sess.FingerprintID == currentFingerprint {
@@ -201,7 +203,8 @@ func isSuspiciousLogin(log logr.Logger, previousSessions []zitadel.Session, curr
 
 	log.Info("Comparing current login against session history",
 		"currentIP", currentIP, "ipSeen", ipSeen, "isNewIP", isNewIP,
-		"currentUserAgent", currentUserAgent, "userAgentSeen", userAgentSeen, "isNewUserAgent", isNewUserAgent,
+		"currentUserAgent", currentUserAgent, "currentUserAgentKey", currentUserAgentKey,
+		"userAgentSeen", userAgentSeen, "isNewUserAgent", isNewUserAgent,
 		"currentFingerprint", currentFingerprint, "fingerprintSeen", fingerprintSeen, "isNewFingerprint", isNewFingerprint,
 	)
 
@@ -322,6 +325,23 @@ func resolveUserAgent(ctx context.Context, log logr.Logger, s *Server, ua string
 	return parseDevice(ua), parseBrowser(ua)
 }
 
+const (
+	unknownDevice  = "Unknown Device"
+	unknownBrowser = "Unknown Browser"
+)
+
+// userAgentKey reduces a user-agent to its browser and device family, so that
+// a browser update is not mistaken for a new browser. The raw string carries
+// the browser version, which changes every few weeks. When neither family is
+// recognised the raw string is kept, so unrelated clients do not match.
+func userAgentKey(ua string) string {
+	device, browser := parseDevice(ua), parseBrowser(ua)
+	if device == unknownDevice && browser == unknownBrowser {
+		return ua
+	}
+	return browser + " on " + device
+}
+
 func parseDevice(ua string) string {
 	uaLower := strings.ToLower(ua)
 	if strings.Contains(uaLower, ",") {
@@ -363,7 +383,7 @@ func parseDevice(ua string) string {
 	if strings.Contains(uaLower, "linux") {
 		return "Linux PC"
 	}
-	return "Unknown Device"
+	return unknownDevice
 }
 
 func parseBrowser(ua string) string {
@@ -402,5 +422,5 @@ func parseBrowser(ua string) string {
 	if strings.Contains(uaLower, "safari/") {
 		return "Safari"
 	}
-	return "Unknown Browser"
+	return unknownBrowser
 }
