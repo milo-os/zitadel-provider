@@ -183,6 +183,12 @@ func findEntry(entries []logEntry, msg string) *logEntry {
 }
 
 func TestSessionAddedHandler(t *testing.T) {
+	const (
+		macChrome153  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+		macChrome154  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+		macFirefox131 = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:131.0) Gecko/20100101 Firefox/131.0"
+	)
+
 	tests := []struct {
 		name           string
 		reqPayload     sessionAddedRequest
@@ -502,6 +508,168 @@ func TestSessionAddedHandler(t *testing.T) {
 				},
 			},
 			wantSuspicious: false,
+		},
+		{
+			// Regression: a browser update changes the version in the raw
+			// user-agent. The same browser on the same device must not be
+			// flagged just because no live session has the new version yet.
+			name: "Browser update on a known device (not suspicious)",
+			reqPayload: sessionAddedRequest{
+				AggregateID: "sess-curr",
+				EventType:   "oidc_session.added",
+				UserID:      "user-1",
+				EventPayload: struct {
+					UserID    string     `json:"userID"`
+					SessionID string     `json:"sessionID"`
+					UserAgent *userAgent `json:"userAgent"`
+				}{
+					UserID: "user-1",
+					UserAgent: &userAgent{
+						IP:            "1.1.1.1",
+						FingerprintID: "known-fingerprint",
+						Description:   macChrome154,
+					},
+				},
+			},
+			mockSessions: []zitadel.Session{
+				{
+					ID:            "sess-curr",
+					UserID:        "user-1",
+					IP:            "1.1.1.1",
+					UserAgent:     macChrome154,
+					FingerprintID: "known-fingerprint",
+					CreatedAt:     time.Now(),
+				},
+				{
+					ID:            "sess-prev",
+					UserID:        "user-1",
+					IP:            "1.1.1.1",
+					UserAgent:     macChrome153,
+					FingerprintID: "known-fingerprint",
+					CreatedAt:     time.Now().Add(-1 * time.Hour),
+				},
+			},
+			wantSuspicious: false,
+		},
+		{
+			name: "Browser update without a fingerprint (not suspicious)",
+			reqPayload: sessionAddedRequest{
+				AggregateID: "sess-curr",
+				EventType:   "oidc_session.added",
+				UserID:      "user-1",
+				EventPayload: struct {
+					UserID    string     `json:"userID"`
+					SessionID string     `json:"sessionID"`
+					UserAgent *userAgent `json:"userAgent"`
+				}{
+					UserID: "user-1",
+					UserAgent: &userAgent{
+						IP:          "1.1.1.1",
+						Description: macChrome154,
+					},
+				},
+			},
+			mockSessions: []zitadel.Session{
+				{
+					ID:        "sess-curr",
+					UserID:    "user-1",
+					IP:        "1.1.1.1",
+					UserAgent: macChrome154,
+					CreatedAt: time.Now(),
+				},
+				{
+					ID:        "sess-prev",
+					UserID:    "user-1",
+					IP:        "1.1.1.1",
+					UserAgent: macChrome153,
+					CreatedAt: time.Now().Add(-1 * time.Hour),
+				},
+			},
+			wantSuspicious: false,
+		},
+		{
+			// A known fingerprint is a client-set cookie, so it must not hide a
+			// different browser on the same IP.
+			name: "Different browser with a known fingerprint (suspicious)",
+			reqPayload: sessionAddedRequest{
+				AggregateID: "sess-curr",
+				EventType:   "oidc_session.added",
+				UserID:      "user-1",
+				EventPayload: struct {
+					UserID    string     `json:"userID"`
+					SessionID string     `json:"sessionID"`
+					UserAgent *userAgent `json:"userAgent"`
+				}{
+					UserID: "user-1",
+					UserAgent: &userAgent{
+						IP:            "1.1.1.1",
+						FingerprintID: "known-fingerprint",
+						Description:   macFirefox131,
+					},
+				},
+			},
+			mockSessions: []zitadel.Session{
+				{
+					ID:            "sess-curr",
+					UserID:        "user-1",
+					IP:            "1.1.1.1",
+					UserAgent:     macFirefox131,
+					FingerprintID: "known-fingerprint",
+					CreatedAt:     time.Now(),
+				},
+				{
+					ID:            "sess-prev",
+					UserID:        "user-1",
+					IP:            "1.1.1.1",
+					UserAgent:     macChrome153,
+					FingerprintID: "known-fingerprint",
+					CreatedAt:     time.Now().Add(-1 * time.Hour),
+				},
+			},
+			wantSuspicious: true,
+			wantDevice:     "Mac",
+			wantBrowser:    "Firefox",
+		},
+		{
+			name: "Known fingerprint from a new IP (suspicious)",
+			reqPayload: sessionAddedRequest{
+				AggregateID: "sess-curr",
+				EventType:   "oidc_session.added",
+				UserID:      "user-1",
+				EventPayload: struct {
+					UserID    string     `json:"userID"`
+					SessionID string     `json:"sessionID"`
+					UserAgent *userAgent `json:"userAgent"`
+				}{
+					UserID: "user-1",
+					UserAgent: &userAgent{
+						IP:            "2.2.2.2",
+						FingerprintID: "known-fingerprint",
+						Description:   macChrome154,
+					},
+				},
+			},
+			mockSessions: []zitadel.Session{
+				{
+					ID:            "sess-curr",
+					UserID:        "user-1",
+					IP:            "2.2.2.2",
+					UserAgent:     macChrome154,
+					FingerprintID: "known-fingerprint",
+					CreatedAt:     time.Now(),
+				},
+				{
+					ID:            "sess-prev",
+					UserID:        "user-1",
+					IP:            "1.1.1.1",
+					UserAgent:     macChrome154,
+					FingerprintID: "known-fingerprint",
+					CreatedAt:     time.Now().Add(-1 * time.Hour),
+				},
+			},
+			wantSuspicious: true,
+			wantDevice:     "Mac",
+			wantBrowser:    "Chrome",
 		},
 		{
 			name: "Passkey-authenticated session is exempt even with a new IP",
@@ -957,6 +1125,54 @@ func TestParseDeviceAndBrowser(t *testing.T) {
 		if gotBrowser != tt.wantBrowser {
 			t.Errorf("parseBrowser(%q) = %q, want %q", tt.ua, gotBrowser, tt.wantBrowser)
 		}
+	}
+}
+
+func TestUserAgentKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		a, b     string
+		wantSame bool
+	}{
+		{
+			name:     "browser version update",
+			a:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+			b:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+			wantSame: true,
+		},
+		{
+			name:     "description from the previous login UI",
+			a:        "Chrome, 153.0.0.0, ,  , Blink, 153.0.0.0, , Mac OS, 10.15.7, ",
+			b:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+			wantSame: true,
+		},
+		{
+			name:     "different browser on the same device",
+			a:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+			b:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:131.0) Gecko/20100101 Firefox/131.0",
+			wantSame: false,
+		},
+		{
+			name:     "same browser on a different device",
+			a:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+			b:        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+			wantSame: false,
+		},
+		{
+			name:     "unrecognised clients do not match each other",
+			a:        "curl/8.4.0",
+			b:        "Wget/1.21.4",
+			wantSame: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keyA, keyB := userAgentKey(tt.a), userAgentKey(tt.b)
+			if (keyA == keyB) != tt.wantSame {
+				t.Errorf("userAgentKey(%q) = %q, userAgentKey(%q) = %q, want same = %v", tt.a, keyA, tt.b, keyB, tt.wantSame)
+			}
+		})
 	}
 }
 
