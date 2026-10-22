@@ -3,7 +3,7 @@ module go.miloapis.com/auth-provider-zitadel
 go 1.25.0
 
 require (
-	github.com/go-logr/logr v1.4.3
+	github.com/go-logr/logr v1.4.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
@@ -91,12 +91,12 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
+	go.opentelemetry.io/otel v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.35.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.35.0 // indirect
-	go.opentelemetry.io/otel/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
-	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.opentelemetry.io/otel/metric v1.45.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.45.0 // indirect
+	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
@@ -105,7 +105,7 @@ require (
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6 // indirect
 	golang.org/x/mod v0.34.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
