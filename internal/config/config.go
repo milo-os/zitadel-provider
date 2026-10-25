@@ -241,7 +241,3 @@ func (c *DiscoveryConfig) ProjectRestConfig() (*rest.Config, error) {
 
 	return clientcmd.BuildConfigFromFlags("", c.ProjectKubeconfigPath)
 }
-
-func init() {
-	SchemeBuilder.Register(&AuthProviderZitadel{})
-}
