@@ -20,7 +20,7 @@ vars:
   TEST_INFRA_CLUSTER_NAME: "test-infra"
   TEST_INFRA_REPO_REF: "v0.6.0"
   # renovate: datasource=go depName=github.com/kyverno/chainsaw
-  CHAINSAW_VERSION: v0.2.9
+  CHAINSAW_VERSION: v0.2.15
   ZITADEL_NAMESPACE: "zitadel-system"
   APP_NAMESPACE: "auth-provider-zitadel-system"
   CERTS_DIR: "certs"
