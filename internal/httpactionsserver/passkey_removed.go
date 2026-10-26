@@ -108,10 +108,11 @@ func sendPasskeyRemovedEmail(ctx context.Context, log logr.Logger, s *Server, us
 		removedDisplay = t.UTC().Format("Jan 2, 2006 at 15:04 UTC")
 	}
 
-	vars := []notificationv1alpha1.EmailVariable{
-		{Name: "UserName", Value: displayName},
-		{Name: "RemovedTime", Value: removedDisplay},
-	}
+	vars := make([]notificationv1alpha1.EmailVariable, 0, 3)
+	vars = append(vars,
+		notificationv1alpha1.EmailVariable{Name: "UserName", Value: displayName},
+		notificationv1alpha1.EmailVariable{Name: "RemovedTime", Value: removedDisplay},
+	)
 	// Always sent, "" when unknown — the contract passkey_added.go uses for
 	// Browser/Device. The template renders this row unconditionally, so an
 	// omitted variable renders Go's `<no value>` into the text body.

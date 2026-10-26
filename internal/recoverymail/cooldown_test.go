@@ -101,7 +101,7 @@ func TestTooSoon_HourlyCap(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			var objs []client.Object
+			objs := make([]client.Object, 0, tt.sent)
 			for i := range tt.sent {
 				// All past the 2m cooldown, all inside the hour.
 				objs = append(objs, sentAgo(fmt.Sprintf("a%d", i), testUserID, RequestedBySelf,
