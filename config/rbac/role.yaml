@@ -68,6 +68,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - networking.datumapis.com
+  resources:
+  - domains
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - resourcemanager.miloapis.com
   resources:
   - projects
