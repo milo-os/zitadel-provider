@@ -34,6 +34,7 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/client/profile"
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -56,6 +57,7 @@ import (
 	mcsingle "sigs.k8s.io/multicluster-runtime/providers/single"
 
 	"go.miloapis.com/auth-provider-zitadel/internal/controller"
+	"go.miloapis.com/auth-provider-zitadel/internal/workloadidentity/keyset"
 	zitadelHtppClient "go.miloapis.com/auth-provider-zitadel/internal/zitadel"
 	pkgzitadel "go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
@@ -128,6 +130,8 @@ and manages the auth provider lifecycle.`,
 		"How often the abandoned-account sweep runs. Zero or negative disables it.")
 	cmd.Flags().BoolVar(&cfg.AbandonedAccountGCDryRun, "abandoned-account-gc-dry-run", cfg.AbandonedAccountGCDryRun,
 		"Report which abandoned accounts would be collected without deleting them. Defaults TRUE because this deletes user accounts.")
+	cmd.Flags().BoolVar(&cfg.EnableWorkloadIdentityIssuers, "enable-workload-identity-issuers", cfg.EnableWorkloadIdentityIssuers,
+		"Run the WorkloadIdentityIssuer controllers in project control planes. Where the WorkloadIdentityIssuer kind is not served, they are skipped with a warning.")
 
 	// Leader election flags
 	cmd.Flags().BoolVar(&cfg.LeaderElection.Enabled, "leader-elect", cfg.LeaderElection.Enabled, "Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
@@ -443,6 +447,20 @@ func runController(cfg *config.ControllerConfig, globalConfig *config.GlobalConf
 		os.Exit(1)
 	}
 
+	// Setup the WorkloadIdentityIssuer controllers on the multicluster manager (for project control planes), when enabled.
+	// The kind is looked up where the manager's clusters get their kinds: the deployment cluster in single mode, and
+	// in milo mode the core control plane, whose CRDs every project control plane shares.
+	servedKinds := deploymentCluster.GetRESTMapper()
+	if serverConfig.Discovery.Mode == milomulticluster.ProviderMilo {
+		servedKinds = coreControlPlaneCluster.GetRESTMapper()
+	}
+	workloadIdentityIssuers, err := setupWorkloadIdentityIssuerControllers(cfg.EnableWorkloadIdentityIssuers, mgr, servedKinds)
+	if err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "WorkloadIdentityIssuer")
+		os.Exit(1)
+	}
+	setupLog.Info("WorkloadIdentityIssuer controllers", "enabled", workloadIdentityIssuers)
+
 	// Setup ProjectController on core control plane manager
 	if err = (&controller.ProjectController{
 		Zitadel: zitadelSDKClient,
@@ -643,6 +661,32 @@ func initializeClusterDiscovery(
 	}
 
 	return runnables, provider, nil
+}
+
+// setupWorkloadIdentityIssuerControllers registers the WorkloadIdentityIssuer
+// controllers on the multicluster manager when enabled is true and
+// servedKinds maps the WorkloadIdentityIssuer kind, and reports whether it
+// did. Their watches need the kind: where it is not served, the manager could
+// not engage a cluster, and every controller on it would stop. So a kind that
+// is not served leaves them out, with a warning, and the rest run as before.
+// The check runs once, at startup.
+func setupWorkloadIdentityIssuerControllers(enabled bool, mgr mcmanager.Manager, servedKinds meta.RESTMapper) (bool, error) {
+	if !enabled {
+		return false, nil
+	}
+	kind := iammiloapiscomv1alpha1.SchemeGroupVersion.WithKind("WorkloadIdentityIssuer")
+	if _, err := servedKinds.RESTMapping(kind.GroupKind(), kind.Version); err != nil {
+		if !meta.IsNoMatchError(err) {
+			return false, fmt.Errorf("unable to check that %s is served: %w", kind.Kind, err)
+		}
+		setupLog.Info("WARNING: the WorkloadIdentityIssuer controllers are enabled, but the kind is not served, so they do not run; restart once it is installed",
+			"error", err.Error())
+		return false, nil
+	}
+	if err := (&keyset.Controller{}).SetupWithManager(mgr); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func ignoreCanceled(err error) error {

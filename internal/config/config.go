@@ -120,6 +120,12 @@ type ControllerConfig struct {
 	// must not be the same as enabling it.
 	AbandonedAccountGCDryRun bool
 
+	// EnableWorkloadIdentityIssuers runs the WorkloadIdentityIssuer controllers
+	// on the multicluster manager. Defaults FALSE. Their watches need the
+	// WorkloadIdentityIssuer kind, so where it is not served they are skipped
+	// with a warning, and the other controllers run as before.
+	EnableWorkloadIdentityIssuers bool
+
 	// Zitadel connection details
 	Zitadel ZitadelConfig
 }
@@ -136,6 +142,9 @@ func NewControllerConfig() *ControllerConfig {
 		AbandonedAccountRetention:  30 * 24 * time.Hour,
 		AbandonedAccountGCInterval: 6 * time.Hour,
 		AbandonedAccountGCDryRun:   true,
+
+		EnableWorkloadIdentityIssuers: false,
+
 		LeaderElection: LeaderElectionConfig{
 			Enabled:         false,
 			ID:              "auth-provider-zitadel-leader",
