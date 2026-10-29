@@ -144,7 +144,7 @@ func NewControllerConfig() *ControllerConfig {
 			LeaseDuration:   15 * time.Second, // Default lease duration
 			RenewDeadline:   10 * time.Second, // Default renew deadline
 			RetryPeriod:     2 * time.Second,  // Default retry period
-			ReleaseOnCancel: false,            // Default to false for safety
+			ReleaseOnCancel: true,             // The process ends when the manager stops
 		},
 		Metrics: MetricsConfig{
 			CertName:      "tls.crt",

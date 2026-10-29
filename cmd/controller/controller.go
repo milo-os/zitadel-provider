@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -342,36 +343,7 @@ func runController(cfg *config.ControllerConfig, globalConfig *config.GlobalConf
 		LeaderElection:         cfg.LeaderElection.Enabled,
 		LeaderElectionID:       "auth-provider-zitadel.datumapis.com",
 	}
-
-	// Add optional leader election configuration
-	// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-	// when the Manager ends. This requires the binary to immediately end when the
-	// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-	// speeds up voluntary leader transitions as the new leader don't have to wait
-	// LeaseDuration time first.
-	//
-	// In the default scaffold provided, the program ends immediately after
-	// the manager stops, so would be fine to enable this option. However,
-	// if you are doing or is intended to do any operation such as perform cleanups
-	// after the manager stops then its usage might be unsafe.
-	// LeaderElectionReleaseOnCancel: true,
-	if cfg.LeaderElection.Enabled {
-		if cfg.LeaderElection.Namespace != "" {
-			mgrOptions.LeaderElectionNamespace = cfg.LeaderElection.Namespace
-		}
-		if cfg.LeaderElection.ResourceLock != "" {
-			mgrOptions.LeaderElectionResourceLock = cfg.LeaderElection.ResourceLock
-		}
-		if cfg.LeaderElection.LeaseDuration > 0 {
-			mgrOptions.LeaseDuration = &cfg.LeaderElection.LeaseDuration
-		}
-		if cfg.LeaderElection.RenewDeadline > 0 {
-			mgrOptions.RenewDeadline = &cfg.LeaderElection.RenewDeadline
-		}
-		if cfg.LeaderElection.RetryPeriod > 0 {
-			mgrOptions.RetryPeriod = &cfg.LeaderElection.RetryPeriod
-		}
-	}
+	applyLeaderElection(&mgrOptions, cfg.LeaderElection, upstreamClusterConfig)
 
 	// Create main multicluster manager with leader election
 	mgr, err := mcmanager.New(upstreamClusterConfig, provider, mgrOptions)
@@ -514,25 +486,85 @@ func runController(cfg *config.ControllerConfig, globalConfig *config.GlobalConf
 	}
 
 	ctx := ctrl.SetupSignalHandler()
-	g, ctx := errgroup.WithContext(ctx)
 
+	workers := make([]func(context.Context) error, 0, len(runnables))
 	for _, runnable := range runnables {
-		g.Go(func() error {
-			return ignoreCanceled(runnable.Start(ctx))
-		})
+		workers = append(workers, runnable.Start)
 	}
 
 	setupLog.Info("starting multicluster manager")
-	g.Go(func() error {
-		return ignoreCanceled(mgr.Start(ctx))
-	})
-
-	if err := g.Wait(); err != nil {
+	if err := runUntilManagerStops(ctx, mgr.Start, workers...); err != nil {
 		setupLog.Error(err, "unable to start")
 		os.Exit(1)
 	}
 
 	return nil
+}
+
+// applyLeaderElection sets the manager's leader election from its flags. The
+// lease gets a client of its own, so other API traffic cannot delay its
+// renewals, and the leader releases it on shutdown when asked, which is safe
+// because runUntilManagerStops ends the process once the manager stops.
+func applyLeaderElection(opts *ctrl.Options, le config.LeaderElectionConfig, upstream *rest.Config) {
+	if le.Enabled {
+		opts.LeaderElectionConfig = leaderElectionRestConfig(upstream)
+		opts.LeaderElectionReleaseOnCancel = le.ReleaseOnCancel
+		if le.Namespace != "" {
+			opts.LeaderElectionNamespace = le.Namespace
+		}
+		if le.ResourceLock != "" {
+			opts.LeaderElectionResourceLock = le.ResourceLock
+		}
+		if le.LeaseDuration > 0 {
+			opts.LeaseDuration = &le.LeaseDuration
+		}
+		if le.RenewDeadline > 0 {
+			opts.RenewDeadline = &le.RenewDeadline
+		}
+		if le.RetryPeriod > 0 {
+			opts.RetryPeriod = &le.RetryPeriod
+		}
+	}
+}
+
+func runUntilManagerStops(
+	ctx context.Context,
+	startManager func(context.Context) error,
+	workers ...func(context.Context) error,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	g, ctx := errgroup.WithContext(ctx)
+
+	for _, work := range workers {
+		g.Go(func() error {
+			return ignoreCanceled(work(ctx))
+		})
+	}
+
+	g.Go(func() error {
+		defer cancel()
+		return ignoreCanceled(startManager(ctx))
+	})
+
+	return g.Wait()
+}
+
+const (
+	leaderElectionQPS   = 5
+	leaderElectionBurst = 10
+)
+
+func leaderElectionRestConfig(base *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(base)
+	cfg.RateLimiter = nil
+	cfg.QPS = leaderElectionQPS
+	cfg.Burst = leaderElectionBurst
+	cfg.Dial = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	return cfg
 }
 
 type runnableProvider interface {
