@@ -46,10 +46,19 @@ rules:
   resources:
   - serviceaccounts/status
   - users/status
+  - workloadidentityissuers/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - iam.miloapis.com
+  resources:
+  - workloadidentityissuers
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - infrastructure.miloapis.com
   resources:

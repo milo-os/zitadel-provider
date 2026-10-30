@@ -12,7 +12,7 @@ require (
 	github.com/zitadel/oidc/v3 v3.47.5
 	github.com/zitadel/zitadel v1.80.0-v2.20.0.20260717062356-56f4798ed31f
 	github.com/zitadel/zitadel-go/v3 v3.28.0
-	go.miloapis.com/milo v0.36.2-0.20261006165928-7e9f9a771915
+	go.miloapis.com/milo v0.36.17-0.20261028102427-900fb40b0e29
 	go.uber.org/zap v1.27.1
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sync v0.23.0
@@ -26,6 +26,7 @@ require (
 	k8s.io/klog/v2 v2.140.0
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad
 	k8s.io/kubernetes v1.37.1
+	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	sigs.k8s.io/controller-runtime v0.25.2
 	sigs.k8s.io/multicluster-runtime v0.25.2
 )
@@ -123,7 +124,7 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
-	k8s.io/apiextensions-apiserver v0.37.0 // indirect
+	k8s.io/apiextensions-apiserver v0.37.1 // indirect
 	k8s.io/cloud-provider v0.37.1 // indirect
 	k8s.io/controller-manager v0.37.1 // indirect
 	k8s.io/kms v0.37.1 // indirect
@@ -135,7 +136,6 @@ require (
 	k8s.io/kubelet v0.37.1 // indirect
 	k8s.io/metrics v0.37.1 // indirect
 	k8s.io/streaming v0.37.1 // indirect
-	k8s.io/utils v0.0.0-20260626114624-be93311217bd // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
