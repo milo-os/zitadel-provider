@@ -77,7 +77,11 @@ func (r *PlatformAccessController) Reconcile(ctx context.Context, req reconcile.
 		var err error
 		waitingForUserState, err = r.ensureZitadelUserState(ctx, userName, expectActive)
 		if err != nil {
-			log.Error(err, "Failed to align Zitadel user state", "userName", userName)
+			if errors.IsNotFound(err) {
+				log.Info("Waiting for missing Zitadel identity", "userName", userName)
+			} else {
+				log.Error(err, "Failed to align Zitadel user state", "userName", userName)
+			}
 			reconcileErr = err
 		}
 	}
@@ -93,6 +97,9 @@ func (r *PlatformAccessController) Reconcile(ctx context.Context, req reconcile.
 		}
 	}
 
+	if errors.IsNotFound(reconcileErr) {
+		return ctrl.Result{RequeueAfter: userStateRequeueAfter}, nil
+	}
 	if reconcileErr != nil {
 		return ctrl.Result{}, reconcileErr
 	}
@@ -170,6 +177,10 @@ func (r *PlatformAccessController) updateStatusConditions(status *iammiloapiscom
 	}
 
 	switch {
+	case errors.IsNotFound(err):
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "ZitadelUserNotFound"
+		cond.Message = fmt.Sprintf("Zitadel identity is missing; waiting for provisioning or identity repair: %s", err)
 	case err != nil:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "SyncFailed"

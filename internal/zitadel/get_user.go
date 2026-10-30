@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net/http"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -60,6 +63,9 @@ func (c *Client) GetUser(ctx context.Context, userID string) (*GetUserResponse, 
 	var resp GetUserResponse
 	path := fmt.Sprintf("v2/users/%s", userID)
 	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, apierrors.NewNotFound(schema.GroupResource{Group: "zitadel", Resource: "users"}, userID)
+		}
 		log.Error(err, "Failed to get user information", "userID", userID)
 		return nil, err
 	}
