@@ -10,7 +10,6 @@ require (
 	github.com/prometheus/client_golang v1.24.0
 	github.com/spf13/cobra v1.10.2
 	github.com/zitadel/oidc/v3 v3.47.5
-	github.com/zitadel/zitadel v1.80.0-v2.20.0.20260717062356-56f4798ed31f
 	github.com/zitadel/zitadel-go/v3 v3.28.0
 	go.miloapis.com/milo v0.36.2-0.20261006165928-7e9f9a771915
 	go.uber.org/zap v1.27.1
@@ -89,6 +88,7 @@ require (
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/tidwall/match v1.2.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/zitadel/logging v0.7.0 // indirect
 	github.com/zitadel/schema v1.3.2 // indirect
