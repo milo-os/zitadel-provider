@@ -8,7 +8,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
-	"github.com/zitadel/zitadel/pkg/actions"
+	"github.com/zitadel/zitadel-go/v3/pkg/actions"
 	"go.miloapis.com/auth-provider-zitadel/internal/config"
 	"go.miloapis.com/auth-provider-zitadel/internal/httpactionsserver"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
