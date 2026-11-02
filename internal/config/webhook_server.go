@@ -17,6 +17,9 @@ type WebhookServerConfig struct {
 	JwtExpiration            time.Duration
 	JwtRefreshBefore         time.Duration
 	MetricsBindAddress       string
+	// HealthProbeBindAddress serves /readyz, which answers only once the webhook
+	// server accepts TLS, so a new pod joins the Service when it can answer.
+	HealthProbeBindAddress string
 
 	// EmailVerificationTemplate is the EmailTemplate resource used for signup
 	// verification mail. Empty disables the endpoint entirely — the route is not

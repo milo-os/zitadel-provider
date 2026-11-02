@@ -9,8 +9,10 @@ import (
 	notificationv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	k8sconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -54,8 +56,10 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	cmd.Flags().DurationVar(&cfg.JwtExpiration, "jwt-expiration", time.Hour, "JWT token expiration duration (e.g., 1h, 30m, 2h30m)")
 	cmd.Flags().DurationVar(&cfg.JwtRefreshBefore, "jwt-refresh-before", 5*time.Minute, "Leeway before JWT expiry to consider cache invalid and force refresh (e.g., 5m)")
 
-	// Metrics flags.
+	// Metrics and probe flags.
 	cmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", ":8080", "address the metrics endpoint binds to")
+	cmd.Flags().StringVar(&cfg.HealthProbeBindAddress, "health-probe-bind-address", ":8081",
+		"address the probe endpoint binds to; /readyz answers once the webhook server serves")
 
 	// Email verification flags.
 	cmd.Flags().StringVar(&cfg.EmailVerificationTemplate, "email-verification-template", cfg.EmailVerificationTemplate,
@@ -172,33 +176,15 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 		return fmt.Errorf("failed to get rest config: %w", err)
 	}
 
-	runtimeScheme := runtime.NewScheme()
-	if err := authenticationv1.AddToScheme(runtimeScheme); err != nil {
-		return fmt.Errorf("failed to add authenticationv1 scheme: %w", err)
-	}
-	if err := iamv1alpha1.AddToScheme(runtimeScheme); err != nil {
-		return fmt.Errorf("failed to add iam scheme: %w", err)
-	}
-	if err := notificationv1alpha1.AddToScheme(runtimeScheme); err != nil {
-		return fmt.Errorf("failed to add notification scheme: %w", err)
+	runtimeScheme, err := newScheme()
+	if err != nil {
+		return err
 	}
 
 	log.Info("Creating manager")
-	mgr, err := manager.New(restConfig, manager.Options{
-		Scheme: runtimeScheme,
-		Metrics: server.Options{
-			BindAddress: cfg.MetricsBindAddress,
-		},
-		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
-			CertDir:      cfg.CertDir,
-			CertName:     cfg.CertFile,
-			KeyName:      cfg.KeyFile,
-			ClientCAName: cfg.ClientCAFile,
-			Port:         cfg.WebhookPort,
-		}),
-	})
+	mgr, err := newManager(restConfig, cfg, runtimeScheme)
 	if err != nil {
-		return fmt.Errorf("failed to create manager: %w", err)
+		return err
 	}
 
 	// Uncached client, shared by both mail endpoints: each reads a single User per
@@ -224,4 +210,63 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 
 	log.Info("Starting manager")
 	return mgr.Start(cmd.Context())
+}
+
+// newScheme returns the scheme of the types the webhook reads and writes.
+func newScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	if err := authenticationv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add authenticationv1 scheme: %w", err)
+	}
+	if err := iamv1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add iam scheme: %w", err)
+	}
+	if err := notificationv1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add notification scheme: %w", err)
+	}
+	return scheme, nil
+}
+
+// newManager returns the manager, whose /readyz answers only once the webhook
+// server accepts TLS.
+func newManager(restConfig *rest.Config, cfg *config.WebhookServerConfig, scheme *runtime.Scheme) (manager.Manager, error) {
+	mgr, err := manager.New(restConfig, managerOptions(cfg, scheme))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create manager: %w", err)
+	}
+	if err := addReadiness(mgr, mgr.GetWebhookServer()); err != nil {
+		return nil, fmt.Errorf("failed to add the webhook server's readiness check: %w", err)
+	}
+	return mgr, nil
+}
+
+// managerOptions returns the manager's options: the scheme, the metrics and
+// probe endpoints, and the TLS webhook server.
+func managerOptions(cfg *config.WebhookServerConfig, scheme *runtime.Scheme) manager.Options {
+	return manager.Options{
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: cfg.MetricsBindAddress,
+		},
+		HealthProbeBindAddress: cfg.HealthProbeBindAddress,
+		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
+			CertDir:      cfg.CertDir,
+			CertName:     cfg.CertFile,
+			KeyName:      cfg.KeyFile,
+			ClientCAName: cfg.ClientCAFile,
+			Port:         cfg.WebhookPort,
+		}),
+	}
+}
+
+// readyzAdder is the part of the manager addReadiness needs.
+type readyzAdder interface {
+	AddReadyzCheck(name string, check healthz.Checker) error
+}
+
+// addReadiness makes /readyz answer only once the webhook server accepts TLS.
+// Milo's API server sends every token check to this Service, so a pod that is
+// ready before it listens fails those checks during a rollout.
+func addReadiness(mgr readyzAdder, hookServer ctrlwebhook.Server) error {
+	return mgr.AddReadyzCheck("webhook", hookServer.StartedChecker())
 }

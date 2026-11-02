@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: authn-webhook
+  labels:
+    app.kubernetes.io/name: authn-webhook
+    app.kubernetes.io/part-of: auth-provider-zitadel
+spec:
+  # One pod at a time, whatever the replica count: at one replica, minAvailable: 1 would block every drain.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authn-webhook
+      app.kubernetes.io/part-of: auth-provider-zitadel
