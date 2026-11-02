@@ -39,6 +39,7 @@ spec:
             - --zitadel-service-account-key=$(ZITADEL_SERVICE_ACCOUNT_KEY_PATH)
             - --jwt-expiration=$(JWT_EXPIRATION)
             - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
+            - --health-probe-bind-address=$(HEALTH_PROBE_BIND_ADDRESS)
             - --client-ca-file=$(CLIENT_CA_FILE)
             - --mail-webhook-allowed-client-names=$(MAIL_WEBHOOK_ALLOWED_CLIENT_NAMES)
             - --email-verification-template=$(EMAIL_VERIFICATION_TEMPLATE)
@@ -72,6 +73,8 @@ spec:
               value: "1h"
             - name: METRICS_BIND_ADDRESS
               value: ":8443"
+            - name: HEALTH_PROBE_BIND_ADDRESS
+              value: ":8081"
             # Empty leaves the verification endpoint unregistered; an overlay opts in.
             - name: EMAIL_VERIFICATION_TEMPLATE
               value: ""
@@ -115,6 +118,17 @@ spec:
             - containerPort: 8090
               name: webhook
               protocol: TCP
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          # Ready only once the webhook server accepts TLS: Milo's API server sends
+          # every token check to this Service, including during a rollout.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
