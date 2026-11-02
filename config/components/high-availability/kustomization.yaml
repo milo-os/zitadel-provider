@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Production high-availability for the authn-webhook, which checks every Milo API request's token:
+#   - Runs 2 replicas, spread across nodes and zones
+#   - PodDisruptionBudget, so a node drain waits until another replica is ready
+
+resources:
+  - authn-webhook-pdb.yaml
+
+patches:
+  - target:
+      kind: Deployment
+      name: authn-webhook
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: authn-webhook
+                app.kubernetes.io/part-of: auth-provider-zitadel
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: authn-webhook
+                app.kubernetes.io/part-of: auth-provider-zitadel
