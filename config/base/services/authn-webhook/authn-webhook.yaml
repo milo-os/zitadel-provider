@@ -129,6 +129,12 @@ spec:
               port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
+          # The process exits at SIGTERM, so it keeps listening here until its endpoint is
+          # gone from the Service; without this, a rollout fails the token checks in between.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
