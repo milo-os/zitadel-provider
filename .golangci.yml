@@ -34,6 +34,9 @@ linters:
           - dupl
           - lll
         path: ./...
+      - linters:
+          - staticcheck
+        text: 'SA1019: \(github\.com/zitadel/zitadel-go/v3/pkg/client/zitadel/org/v2\.AddOrganizationRequest\)\.OrgId is deprecated'
     paths:
       - third_party$
       - builtin$
