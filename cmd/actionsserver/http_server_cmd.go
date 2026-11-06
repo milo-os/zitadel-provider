@@ -15,6 +15,7 @@ import (
 	signature "go.miloapis.com/auth-provider-zitadel/pkg/zitadel-actions/signature"
 	iamiamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	notificationv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/clientcmd"
@@ -63,6 +64,8 @@ If a TLS certificate and key are provided, the server will start in HTTPS mode. 
 			scheme := runtime.NewScheme()
 			utilruntime.Must(iamiamv1alpha1.AddToScheme(scheme))
 			utilruntime.Must(notificationv1alpha1.AddToScheme(scheme))
+			// core/v1 Events record user lifecycle activity (signup, passkeys).
+			utilruntime.Must(corev1.AddToScheme(scheme))
 			log.V(1).Info("Successfully built Kubernetes scheme")
 
 			log.Info("Creating Kubernetes client")

@@ -8,6 +8,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"go.miloapis.com/auth-provider-zitadel/internal/emailverified"
+	"go.miloapis.com/auth-provider-zitadel/internal/userprovision"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 )
 
@@ -58,6 +60,7 @@ var _ = ginkgo.Describe("UserSweeper", func() {
 		sctx = context.TODO()
 		scheme = runtime.NewScheme()
 		gomega.Expect(iammiloapiscomv1alpha1.AddToScheme(scheme)).To(gomega.Succeed())
+		gomega.Expect(corev1.AddToScheme(scheme)).To(gomega.Succeed())
 	})
 
 	human := func(id, email, given, family, state string) zitadel.User {
@@ -95,6 +98,29 @@ var _ = ginkgo.Describe("UserSweeper", func() {
 		var list iammiloapiscomv1alpha1.UserList
 		gomega.Expect(k8sFake.List(sctx, &list)).To(gomega.Succeed())
 		gomega.Expect(list.Items).To(gomega.HaveLen(4))
+	})
+
+	ginkgo.It("records AccountCreated for each User it provisions, and only those", func() {
+		k8sFake := fake.NewClientBuilder().WithScheme(scheme).Build()
+		gomega.Expect(k8sFake.Create(sctx, &iammiloapiscomv1alpha1.User{
+			ObjectMeta: metav1.ObjectMeta{Name: "u-existing"},
+		})).To(gomega.Succeed())
+		lister := &mockUserLister{pages: [][]zitadel.User{{
+			human("u-existing", "a@example.com", "A", "B", "USER_STATE_ACTIVE"),
+			human("u-missing", "c@example.com", "C", "D", "USER_STATE_ACTIVE"),
+		}}}
+		s := &UserSweeper{Client: k8sFake, Zitadel: lister}
+
+		gomega.Expect(s.sweepOnce(sctx)).To(gomega.Succeed())
+
+		// The sweep stands in for a missed create webhook, so the recovered signup
+		// still reaches the user's Activity feed.
+		var events corev1.EventList
+		gomega.Expect(k8sFake.List(sctx, &events, client.InNamespace(userprovision.EventNamespace))).To(gomega.Succeed())
+		gomega.Expect(events.Items).To(gomega.HaveLen(1))
+		gomega.Expect(events.Items[0].Reason).To(gomega.Equal(userprovision.EventReasonAccountCreated))
+		gomega.Expect(events.Items[0].InvolvedObject.Name).To(gomega.Equal("u-missing"))
+		gomega.Expect(events.Items[0].InvolvedObject.Kind).To(gomega.Equal("User"))
 	})
 
 	ginkgo.It("diffs against a single List instead of per-user Gets", func() {

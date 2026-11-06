@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"go.miloapis.com/auth-provider-zitadel/internal/userprovision"
+
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -165,6 +167,8 @@ func (s *Server) passkeyAddedHandler(w http.ResponseWriter, r *http.Request) {
 	if err := sendPasskeyAddedEmail(r.Context(), log, s, userID, req.CreatedAt, req.passkeyName()); err != nil {
 		log.Error(err, "Failed to send passkey-added notification email", "userId", userID)
 	}
+
+	s.recordUserEvent(r.Context(), log, userID, userprovision.EventReasonPasskeyEnrolled, passkeyEventMessage("added", req.passkeyName()))
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("success"))
