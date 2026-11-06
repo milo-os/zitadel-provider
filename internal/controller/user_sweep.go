@@ -146,8 +146,8 @@ func (s *UserSweeper) sweepOnce(ctx context.Context) error {
 				continue
 			}
 			sweepMissing.Inc()
-			created, err := userprovision.EnsureUser(ctx, s.Client,
-				userprovision.NewUser(u.ID, u.Email, u.GivenName, u.FamilyName))
+			user := userprovision.NewUser(u.ID, u.Email, u.GivenName, u.FamilyName)
+			created, err := userprovision.EnsureUser(ctx, s.Client, user)
 			if err != nil {
 				sweepErrors.Inc()
 				return fmt.Errorf("create user %s: %w", u.ID, err)
@@ -155,6 +155,9 @@ func (s *UserSweeper) sweepOnce(ctx context.Context) error {
 			if created {
 				sweepCreated.Inc()
 				log.Info("Provisioned missing User resource", "zitadelUserId", u.ID, "email", u.Email)
+				// The sweep stands in for a missed create webhook, so it records the
+				// signup the webhook would have.
+				userprovision.RecordEvent(ctx, s.Client, log, user.Name, user.UID, userprovision.EventReasonAccountCreated, "Account created")
 			}
 		}
 		if raw < sweepPageSize {

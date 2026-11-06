@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"go.miloapis.com/auth-provider-zitadel/internal/userprovision"
+
 	"github.com/go-logr/logr"
 	"go.miloapis.com/auth-provider-zitadel/pkg/zitadel"
 	iamv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
@@ -75,11 +77,16 @@ func (s *Server) passkeyRemovedHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := sendPasskeyRemovedEmail(r.Context(), log, s, userID, req.CreatedAt, req.EventPayload.WebAuthNTokenID); err != nil {
+	// Resolved once and shared by the email and the activity event.
+	passkeyName := passkeyNameFromMetadata(r.Context(), s.zitadelAPI(), userID, req.EventPayload.WebAuthNTokenID)
+
+	if err := sendPasskeyRemovedEmail(r.Context(), log, s, userID, req.CreatedAt, passkeyName); err != nil {
 		// Logged, not returned: Zitadel only needs the ack. Established
 		// fire-and-forget posture of every handler here.
 		log.Error(err, "Failed to send passkey-removed notification email", "userId", userID)
 	}
+
+	s.recordUserEvent(r.Context(), log, userID, userprovision.EventReasonPasskeyRemoved, passkeyEventMessage("removed", passkeyName))
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("success"))
@@ -87,7 +94,7 @@ func (s *Server) passkeyRemovedHandler(w http.ResponseWriter, r *http.Request) {
 
 // sendPasskeyRemovedEmail looks up the User by Zitadel userID and creates an
 // Email for the user-passkey-removed template.
-func sendPasskeyRemovedEmail(ctx context.Context, log logr.Logger, s *Server, userID, removedAt, tokenID string) error {
+func sendPasskeyRemovedEmail(ctx context.Context, log logr.Logger, s *Server, userID, removedAt, passkeyName string) error {
 	if s.config.PasskeyRemovedEmailTemplate == "" {
 		log.V(1).Info("PasskeyRemovedEmailTemplate not configured; skipping notification")
 		return nil
@@ -118,7 +125,7 @@ func sendPasskeyRemovedEmail(ctx context.Context, log logr.Logger, s *Server, us
 	// omitted variable renders Go's `<no value>` into the text body.
 	vars = append(vars, notificationv1alpha1.EmailVariable{
 		Name:  "PasskeyName",
-		Value: passkeyNameFromMetadata(ctx, s.zitadelClient, userID, tokenID),
+		Value: passkeyName,
 	})
 
 	email := &notificationv1alpha1.Email{

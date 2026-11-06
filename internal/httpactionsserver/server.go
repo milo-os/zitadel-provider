@@ -303,6 +303,10 @@ func (s *Server) createUserAccountHandler(w http.ResponseWriter, r *http.Request
 		"email", req.EventPayload.Email,
 	)
 
+	// Only on a real create: a retried webhook (already exists) must not record the
+	// signup twice.
+	userprovision.RecordEvent(r.Context(), s.k8sClient, log, user.Name, user.UID, userprovision.EventReasonAccountCreated, "Account created")
+
 	// C11: record the initial EmailVerification field so the value is right from the
 	// first reconcile — IdP-created users are verified at creation and must not wait
 	// for a sweep to be welcomed. Best effort: never fail the provisioning ack over
