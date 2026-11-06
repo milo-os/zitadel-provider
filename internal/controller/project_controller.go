@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -31,7 +32,8 @@ import (
 )
 
 const (
-	projectFinalizerKey = "auth-provider-zitadel.miloapis.com/project"
+	projectFinalizerKey    = "auth-provider-zitadel.miloapis.com/project"
+	projectConflictRequeue = time.Second
 )
 
 // ProjectController reconciles Project resources in the main cluster.
@@ -100,6 +102,13 @@ func (r *ProjectController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if finalizeResult.Updated {
 		log.Info("Finalizer updated the object. Updating API server")
 		if err := r.Client.Update(ctx, project); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+			if errors.IsConflict(err) {
+				log.V(1).Info("Project changed while updating its finalizer; requeuing")
+				return ctrl.Result{RequeueAfter: projectConflictRequeue}, nil
+			}
 			log.Error(err, "Failed to update Project after finalizer")
 			return ctrl.Result{}, fmt.Errorf("update project after finalizer: %w", err)
 		}
