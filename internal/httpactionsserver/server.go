@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -28,7 +29,10 @@ import (
 // ServerConfig holds configuration for the HTTP actions server
 // It mirrors the previous ActionsServerConfig that lived under cmd/actionsserver.
 type ServerConfig struct {
-	Addr                       string
+	Addr string
+	// HealthProbeAddr serves /healthz on its own listener, so the kubelet can
+	// probe the process while Addr stays on localhost. Empty or "0" disables it.
+	HealthProbeAddr            string
 	CertFile                   string
 	KeyFile                    string
 	DisableHTTP2               bool
@@ -195,9 +199,44 @@ type createUserAccountRequest struct {
 	} `json:"event_payload"`
 }
 
+// HealthHandler answers /healthz while the process serves HTTP. It checks no
+// dependency: a Zitadel or API server outage must not restart the server.
+func HealthHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+	return mux
+}
+
+// startHealthProbe binds the health listener and serves it in the background.
+// A bind failure is returned so a misconfigured address fails startup.
+func (s *Server) startHealthProbe() error {
+	addr := s.config.HealthProbeAddr
+	if addr == "" || addr == "0" {
+		return nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind the health probe listener on %s: %w", addr, err)
+	}
+	log := logf.Log.WithName("httpactionsserver")
+	log.Info("Starting health probe server", "addr", ln.Addr().String())
+	srv := &http.Server{Handler: HealthHandler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error(err, "Health probe server stopped")
+		}
+	}()
+	return nil
+}
+
 // Start starts the HTTP(S) server
 func (s *Server) Start() error {
 	log := logf.Log.WithName("httpactionsserver")
+	if err := s.startHealthProbe(); err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/actions/create-user-account", s.createUserAccountHandler)
 	mux.HandleFunc("/v1/actions/customize-jwt", s.customizeJwtHandler)

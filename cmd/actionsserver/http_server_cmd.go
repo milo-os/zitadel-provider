@@ -131,6 +131,7 @@ If a TLS certificate and key are provided, the server will start in HTTPS mode. 
 
 	// Server flags
 	cmd.Flags().StringVar(&cfg.Addr, "addr", cfg.Addr, "The address the HTTP server binds to (e.g. :8080)")
+	cmd.Flags().StringVar(&cfg.HealthProbeAddr, "health-probe-bind-address", cfg.HealthProbeAddr, "The address the /healthz liveness endpoint binds to, apart from --addr so the kubelet can reach it (empty or 0 disables it)")
 	cmd.Flags().StringVar(&cfg.CertFile, "cert-file", cfg.CertFile, "Path to the TLS certificate file (optional)")
 	cmd.Flags().StringVar(&cfg.KeyFile, "key-file", cfg.KeyFile, "Path to the TLS private key file (optional)")
 	cmd.Flags().BoolVar(&cfg.DisableHTTP2, "disable-http2", cfg.DisableHTTP2, "Disable HTTP/2 when serving with TLS (forces http/1.1)")
