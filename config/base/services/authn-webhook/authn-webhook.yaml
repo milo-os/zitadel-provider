@@ -129,6 +129,16 @@ spec:
               port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Restarts only a process that stops serving HTTP; checks no dependency, so
+          # a Zitadel or API server outage restarts nothing.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
           # The process exits at SIGTERM, so it keeps listening here until its endpoint is
           # gone from the Service; without this, a rollout fails the token checks in between.
           lifecycle:

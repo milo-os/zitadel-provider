@@ -59,7 +59,7 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 	// Metrics and probe flags.
 	cmd.Flags().StringVar(&cfg.MetricsBindAddress, "metrics-bind-address", ":8080", "address the metrics endpoint binds to")
 	cmd.Flags().StringVar(&cfg.HealthProbeBindAddress, "health-probe-bind-address", ":8081",
-		"address the probe endpoint binds to; /readyz answers once the webhook server serves")
+		"address the probe endpoint binds to; /readyz answers once the webhook server serves, /healthz while the process runs")
 
 	// Email verification flags.
 	cmd.Flags().StringVar(&cfg.EmailVerificationTemplate, "email-verification-template", cfg.EmailVerificationTemplate,
@@ -228,14 +228,14 @@ func newScheme() (*runtime.Scheme, error) {
 }
 
 // newManager returns the manager, whose /readyz answers only once the webhook
-// server accepts TLS.
+// server accepts TLS and whose /healthz answers while the process runs.
 func newManager(restConfig *rest.Config, cfg *config.WebhookServerConfig, scheme *runtime.Scheme) (manager.Manager, error) {
 	mgr, err := manager.New(restConfig, managerOptions(cfg, scheme))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create manager: %w", err)
 	}
-	if err := addReadiness(mgr, mgr.GetWebhookServer()); err != nil {
-		return nil, fmt.Errorf("failed to add the webhook server's readiness check: %w", err)
+	if err := addProbes(mgr, mgr.GetWebhookServer()); err != nil {
+		return nil, err
 	}
 	return mgr, nil
 }
@@ -259,14 +259,23 @@ func managerOptions(cfg *config.WebhookServerConfig, scheme *runtime.Scheme) man
 	}
 }
 
-// readyzAdder is the part of the manager addReadiness needs.
-type readyzAdder interface {
+// probeAdder is the part of the manager addProbes needs.
+type probeAdder interface {
 	AddReadyzCheck(name string, check healthz.Checker) error
+	AddHealthzCheck(name string, check healthz.Checker) error
 }
 
-// addReadiness makes /readyz answer only once the webhook server accepts TLS.
-// Milo's API server sends every token check to this Service, so a pod that is
-// ready before it listens fails those checks during a rollout.
-func addReadiness(mgr readyzAdder, hookServer ctrlwebhook.Server) error {
-	return mgr.AddReadyzCheck("webhook", hookServer.StartedChecker())
+// addProbes makes /readyz answer only once the webhook server accepts TLS, and
+// /healthz answer while the process serves HTTP. Milo's API server sends every
+// token check to this Service, so a pod that is ready before it listens fails
+// those checks during a rollout. Liveness checks no dependency: a Zitadel or
+// API server outage must not restart every replica.
+func addProbes(mgr probeAdder, hookServer ctrlwebhook.Server) error {
+	if err := mgr.AddReadyzCheck("webhook", hookServer.StartedChecker()); err != nil {
+		return fmt.Errorf("failed to add the webhook server's readiness check: %w", err)
+	}
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to add the liveness check: %w", err)
+	}
+	return nil
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.miloapis.com/auth-provider-zitadel/internal/config"
 )
 
 func TestCreateZitadelClient_Validation(t *testing.T) {
@@ -84,4 +86,19 @@ func TestCreateZitadelClient_Validation(t *testing.T) {
 			t.Errorf("expected error about machine-env-key.json, got: %v", err)
 		}
 	})
+}
+
+func TestHealthProbeFlag(t *testing.T) {
+	cmd := NewActionsServerCommand(&config.GlobalConfig{})
+
+	flag := cmd.Flags().Lookup("health-probe-bind-address")
+	if flag == nil {
+		t.Fatal("no --health-probe-bind-address flag: the kubelet cannot reach a liveness endpoint")
+	}
+	if flag.DefValue != "" {
+		t.Errorf("default %q opens a listener nobody asked for; want it off by default", flag.DefValue)
+	}
+	if err := cmd.Flags().Set("health-probe-bind-address", ":8081"); err != nil {
+		t.Fatalf("set flag: %v", err)
+	}
 }

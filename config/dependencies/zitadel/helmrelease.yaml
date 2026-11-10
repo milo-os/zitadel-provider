@@ -177,6 +177,20 @@ spec:
           - --zitadel-issuer=https://zitadel.zitadel-system.svc.cluster.local:443
           - --zitadel-api=zitadel.zitadel-system.svc.cluster.local:443
           - --zitadel-key=/etc/zitadel/auth/sa.json
+          - --health-probe-bind-address=:8081
+        ports:
+          - containerPort: 8081
+            name: actions-health
+        # The actions API stays on localhost; liveness uses its own listener and
+        # checks no dependency, so a Zitadel outage restarts nothing.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
         volumeMounts:
           - name: zitadel-admin-sa
             mountPath: /etc/zitadel/auth
