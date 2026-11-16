@@ -241,7 +241,9 @@ func NewAPIServerCommand(global *config.GlobalConfig) *cobra.Command {
 			}
 
 			log.Info("API server is starting")
-			return srv.PrepareRun().RunWithContext(cmd.Context())
+			// cmd.Context() is never cancelled, so SIGTERM would kill the server
+			// at once; this context lets it stop gracefully instead.
+			return srv.PrepareRun().RunWithContext(genericserver.SetupSignalContext())
 		},
 	}
 
