@@ -10,6 +10,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	k8sconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -33,7 +34,7 @@ func NewAuthenticationWebhookServerCommand(globalConfig *config.GlobalConfig) *c
 		Use:   "authn-webhook",
 		Short: "Runs the User Authentication TokenReview webhook server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWebhookServer(cmd, cfg)
+			return runWebhookServer(cfg)
 		},
 	}
 
@@ -132,10 +133,14 @@ func unpinnedCallerWarning(cfg *config.WebhookServerConfig) string {
 		"set --mail-webhook-allowed-client-names to pin the caller"
 }
 
-func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error {
+func runWebhookServer(cfg *config.WebhookServerConfig) error {
 	if err := validateWebhookConfig(cfg); err != nil {
 		return err
 	}
+
+	// SIGTERM cancels ctx, so the manager stops the webhook server gracefully:
+	// it answers the requests in flight and closes its connections before it exits.
+	ctx := ctrl.SetupSignalHandler()
 
 	logf.SetLogger(zap.New(zap.JSONEncoder()))
 	log := logf.Log.WithName("authentication-webhook")
@@ -201,7 +206,7 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 	log.Info("Setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
 
-	registerEndpoints(cmd.Context(), hookServer, log, cfg, webhookDeps{
+	registerEndpoints(ctx, hookServer, log, cfg, webhookDeps{
 		introspector:   introspector,
 		directClient:   directClient,
 		allowedClients: allowedClients,
@@ -209,7 +214,7 @@ func runWebhookServer(cmd *cobra.Command, cfg *config.WebhookServerConfig) error
 	})
 
 	log.Info("Starting manager")
-	return mgr.Start(cmd.Context())
+	return mgr.Start(ctx)
 }
 
 // newScheme returns the scheme of the types the webhook reads and writes.

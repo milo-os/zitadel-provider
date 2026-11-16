@@ -139,8 +139,9 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
-          # The process exits at SIGTERM, so it keeps listening here until its endpoint is
-          # gone from the Service; without this, a rollout fails the token checks in between.
+          # The pod keeps listening here until its endpoint is gone from the Service, so new
+          # connections move to another pod before SIGTERM. A kept-alive connection does not
+          # move: on SIGTERM the server answers its checks in flight, then closes it.
           lifecycle:
             preStop:
               sleep:
@@ -160,5 +161,7 @@ spec:
               memory: 64Mi
 
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 10
+      # The budget before SIGKILL: the 5 s preStop, one request (bounded at 10 s in the
+      # server), about 1 s to close an HTTP/2 connection, and a margin.
+      terminationGracePeriodSeconds: 20
       volumes: []

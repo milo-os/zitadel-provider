@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,6 +22,32 @@ const tokenReviewEndpoint = "/apis/authentication.k8s.io/v1/tokenreviews"
 // registerEndpoints uses.
 type endpointRegistrar interface {
 	Register(path string, hook http.Handler)
+}
+
+// requestTimeout bounds each request, because the shutdown does not cancel it
+// (see detachFromShutdown). Milo's API server stops waiting for a token check
+// after 30 s.
+const requestTimeout = 10 * time.Second
+
+// shutdownSafeRegistrar registers each handler behind detachFromShutdown.
+type shutdownSafeRegistrar struct {
+	endpointRegistrar
+}
+
+func (r shutdownSafeRegistrar) Register(path string, hook http.Handler) {
+	r.endpointRegistrar.Register(path, detachFromShutdown(hook))
+}
+
+// detachFromShutdown serves each request on a context that the shutdown does not
+// cancel, bounded by requestTimeout. controller-runtime cancels the base context of
+// every request when the manager stops. Without this, a token check in flight then
+// fails with "context canceled", and the caller gets a 401, not a retry.
+func detachFromShutdown(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), requestTimeout)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // passkeyCodeMinter is the one Zitadel call the recovery endpoint makes.
@@ -66,6 +93,8 @@ func registerEndpoints(
 	cfg *config.WebhookServerConfig,
 	deps webhookDeps,
 ) {
+	reg = shutdownSafeRegistrar{reg}
+
 	webhookv1 := webhook.NewAuthenticationWebhookV1(deps.introspector)
 	reg.Register(webhookv1.Endpoint, webhookv1)
 
