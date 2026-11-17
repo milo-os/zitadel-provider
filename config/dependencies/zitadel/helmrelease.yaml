@@ -12,7 +12,7 @@ spec:
         kind: HelmRepository
         name: zitadel
         namespace: zitadel-system
-      version: 9.x
+      version: 10.x
   install:
     createNamespace: false
     timeout: 15m
