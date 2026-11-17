@@ -3,5 +3,22 @@
   "extends": [
     "config:recommended",
     "github>milo-os/.github:renovate-config"
+  ],
+  "flux": {
+    "managerFilePatterns": [
+      "/(^|/)config/dependencies/zitadel/helm(release|repository)\\.yaml$/"
+    ]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Zitadel image the e2e tests run, set in the HelmRelease values rather than through the chart version",
+      "managerFilePatterns": [
+        "/(^|/)config/dependencies/zitadel/helmrelease\\.yaml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+tag: \"?(?<currentValue>[^\"\\s]+)\"?"
+      ]
+    }
   ]
 }
