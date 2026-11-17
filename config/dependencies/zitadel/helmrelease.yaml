@@ -30,7 +30,7 @@ spec:
   values:
     image:
       # renovate: datasource=docker depName=ghcr.io/zitadel/zitadel
-      tag: v4.12.2
+      tag: v4.20.4
 
     replicaCount: 1
 
