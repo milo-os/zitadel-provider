@@ -29,6 +29,7 @@ spec:
   targetNamespace: zitadel-system
   values:
     image:
+      # renovate: datasource=docker depName=ghcr.io/zitadel/zitadel
       tag: v4.12.2
 
     replicaCount: 1
