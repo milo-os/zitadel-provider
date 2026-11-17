@@ -12,7 +12,7 @@ spec:
         kind: HelmRepository
         name: zitadel
         namespace: zitadel-system
-      version: 9.x
+      version: 10.x
   install:
     createNamespace: false
     timeout: 15m
@@ -40,7 +40,8 @@ spec:
 
     login:
       customConfigmapConfig: |
-        ZITADEL_SERVICE_USER_TOKEN_FILE="/login-client/pat"
+        ZITADEL_LOGINCLIENT_KEYFILE="/login-service-key/tls.key"
+        AUDIENCE="https://zitadel.zitadel-system.svc.cluster.local"
         ZITADEL_API_URL="https://zitadel.zitadel-system.svc.cluster.local:443"
         NODE_EXTRA_CA_CERTS="/etc/zitadel/tls/ca.crt"
         CUSTOM_REQUEST_HEADERS="Host:zitadel.zitadel-system.svc.cluster.local,X-Zitadel-Public-Host:zitadel.zitadel-system.svc.cluster.local"
@@ -136,11 +137,6 @@ spec:
               MachineKey:
                 # Type 1 = JSON service account key
                 Type: 1
-            # Creates the login UI service user (IAM_LOGIN_CLIENT role) and
-            # stores a PAT in the "login-client" secret for the login deployment.
-            LoginClient:
-              Pat:
-                ExpirationDate: "2099-01-01T00:00:00Z"
 
     extraVolumes:
       - name: zitadel-tls
