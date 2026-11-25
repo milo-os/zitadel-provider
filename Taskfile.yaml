@@ -21,6 +21,8 @@ vars:
   TEST_INFRA_REPO_REF: "v0.6.0"
   # renovate: datasource=go depName=github.com/kyverno/chainsaw
   CHAINSAW_VERSION: v0.2.15
+  # renovate: datasource=github-releases depName=golangci/golangci-lint
+  GOLANGCI_LINT_VERSION: v2.15.0
   ZITADEL_NAMESPACE: "zitadel-system"
   APP_NAMESPACE: "auth-provider-zitadel-system"
   CERTS_DIR: "certs"
@@ -399,9 +401,7 @@ tasks:
   lint-ci:
     desc: Run golangci-lint using Docker (matches CI environment)
     cmds:
-      - |
-        GOLANGCI_VERSION=$(cat .golangci-version)
-        docker run --rm -v $(pwd):/app -w /app golangci/golangci-lint:${GOLANGCI_VERSION} golangci-lint run -v
+      - docker run --rm -v $(pwd):/app -w /app golangci/golangci-lint:{{.GOLANGCI_LINT_VERSION}} golangci-lint run -v
 
   run-webhookserver:
     desc: Run the user authentication webhook server locally
