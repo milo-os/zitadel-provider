@@ -61,7 +61,7 @@ spec:
         enabled: true
         image:
           repository: alpine/k8s
-          tag: "1.32.8"
+          tag: "1.37.2"
 
     zitadel:
       # Use a hardcoded master key for CI. In production this comes from a Secret.
